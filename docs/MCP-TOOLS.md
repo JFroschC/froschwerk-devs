@@ -1,73 +1,68 @@
-# MCP-Tool-Vertrag fuer Codex
+# MCP-Tool-Vertrag
 
-Dieses Dokument beschreibt den vorbereiteten Tool-Vertrag fuer einen spaeteren lokalen MCP-Server. Der MCP-Server soll diese Funktionen nur als Adapter exponieren; die fachlichen Regeln liegen in `db/mcp-tools.ts` und `db/local.ts`.
+Stand: 14. August 2026
+
+## Status
+
+Der Harness enthält einen maschinenlesbaren Tool-Vertrag und lokale DB-Funktionen.
+Ein ausführbarer MCP-Server-Adapter ist noch nicht implementiert. Die beschriebenen
+Tools stehen externen Codex-Sitzungen daher noch nicht als echte MCP-Tools zur
+Verfügung.
+
+Die fachlichen Regeln liegen in `db/mcp-tools.ts` und `db/local.ts`.
 
 ## Ziel und Grenzen
 
-Codex darf ueber die MCP-Schnittstelle:
+Über den geplanten Adapter darf ein Agent:
 
-- Tickets lesen
-- Tickets kommentieren
-- eingeschraenkte Statusuebergaenge ausfuehren
-- Agentenlaeufe und Event-Historie lesen
+- Tickets mit Akzeptanzkriterien, Kommentaren, Runs und Events lesen
+- nachvollziehbare Kommentare speichern
+- eingeschränkte Statusübergänge ausführen
+- Agentenläufe für ein Ticket oder Projekt auflisten
 
-Codex darf ueber diese Tools nicht:
+Nicht erlaubt sind:
 
-- Tickets frei editieren oder loeschen
+- Tickets frei löschen oder beliebig umschreiben
 - Secrets oder Provider-Logins lesen
-- beliebige Statusstrings setzen
-- abgeschlossene Tickets ohne Manageraktion wieder oeffnen
-- eine aktive Lease umgehen
+- freie Statusstrings setzen
+- abgeschlossene Tickets ohne Manageraktion wieder öffnen
+- aktive Leases umgehen
 
 ## Actor-Kontext
 
-Schreibende Tools akzeptieren optional einen `actor`:
+Schreibende Funktionen akzeptieren einen Actor:
 
 ```json
 {
   "actorType": "agent",
-  "actorId": "codex",
+  "actorId": "agent-developer-1",
   "authorName": "Codex",
   "runId": "run-..."
 }
 ```
 
-`runId` verbindet Kommentare und Statuswechsel mit einem konkreten Agentenlauf. Fehlt der Actor, wird `agent/codex` verwendet.
+`runId` verbindet Aktion, Ticket und Agentenlauf. Fehlt der Actor, verwendet die
+aktuelle Implementierung einen Codex-Standardactor.
 
-## Tools
+## Vorgesehene Tools
 
 ### `harness.task.read`
 
-Liest ein Ticket mit Akzeptanzkriterien, Kommentaren, Agentenlaeufen und Event-Historie.
-
-Input:
-
-```json
-{
-  "taskId": "FW-115"
-}
-```
-
-Output:
+Liest ein Ticket einschließlich Akzeptanzkriterien, Kommentaren, AgentRuns und
+Task-Events.
 
 ```json
-{
-  "task": {},
-  "agentRuns": [],
-  "events": []
-}
+{ "taskId": "FBT-477-A56D" }
 ```
 
 ### `harness.task.comment`
 
-Speichert einen Kommentar am Ticket und schreibt ein `comment.created`-Event.
-
-Input:
+Speichert einen Kommentar und erzeugt ein `comment.created`-Event.
 
 ```json
 {
-  "taskId": "FW-115",
-  "body": "Umsetzung abgeschlossen, Tests laufen.",
+  "taskId": "FBT-477-A56D",
+  "body": "Umsetzung abgeschlossen; Testgate erfolgreich.",
   "actor": {
     "actorType": "agent",
     "actorId": "agent-developer-1",
@@ -79,25 +74,14 @@ Input:
 
 ### `harness.task.transition`
 
-Aendert den Ticketstatus nur entlang der erlaubten Uebergaenge und schreibt ein `mcp.status_changed`-Event mit `fromStatus`, `toStatus`, `reason` und `runId`.
+Ändert den Ticketstatus nur entlang des erlaubten Übergangsgraphen und schreibt ein
+`mcp.status_changed`-Event.
 
-Input:
+### `harness.agent_runs.list`
 
-```json
-{
-  "taskId": "FW-115",
-  "status": "Review",
-  "reason": "Akzeptanzkriterien implementiert.",
-  "actor": {
-    "actorType": "agent",
-    "actorId": "agent-developer-1",
-    "authorName": "Codex",
-    "runId": "run-..."
-  }
-}
-```
+Listet Agentenläufe für ein Ticket oder das gesamte Board.
 
-Erlaubte Uebergaenge:
+## Erlaubte Statusübergänge
 
 | Von | Nach |
 | --- | --- |
@@ -107,34 +91,19 @@ Erlaubte Uebergaenge:
 | `Testing` | `Done`, `Changes Requested`, `Blocked` |
 | `Changes Requested` | `In Progress`, `Ready`, `Blocked` |
 | `Blocked` | `Ready` |
-| `Done` | kein MCP-Uebergang |
+| `Done` | kein MCP-Übergang |
 
-### `harness.agent_runs.list`
+Jede schreibende Aktion erzeugt einen Eintrag in `task_events`.
 
-Listet Agentenlaeufe fuer ein Ticket oder das gesamte Board.
+## Bekannte Lücken vor dem MCP-Server
 
-Input:
+1. Der JSON-Schema-Vertrag akzeptiert derzeit nur Ticket-IDs mit `FW-`-Präfix.
+   Reale Projekte verwenden auch Präfixe wie `FBT-`.
+2. Der Übergangsgraph ist eingeschränkt, aber noch nicht vollständig rollenbezogen
+   autorisiert.
+3. Ein Agent darf einen angegebenen `runId` noch nicht durchgängig gegen das aktive
+   Ticket und seine Rolle validieren.
+4. Der Netzwerk-/Transportadapter und seine lokale Zugriffskontrolle fehlen.
 
-```json
-{
-  "taskId": "FW-115"
-}
-```
-
-## Nachvollziehbarkeit
-
-Jede schreibende MCP-Aktion erzeugt einen Eintrag in `task_events`. `harness.task.read` liefert die Events zusammen mit den `agent_runs` aus. Damit kann ein Agentenlauf spaeter rekonstruieren:
-
-- welcher Actor gehandelt hat
-- welche `runId` beteiligt war
-- welcher Statuswechsel durchgefuehrt wurde
-- welche Kommentare waehrend des Laufs entstanden sind
-
-## Implementierungsstand
-
-Der MCP-Server selbst ist noch nicht enthalten. Vorbereitet sind:
-
-- maschinenlesbarer Vertrag: `mcpToolContract`
-- Tool-Funktionen: `mcpReadTask`, `mcpCommentOnTask`, `mcpTransitionTask`, `mcpListAgentRuns`
-- eingeschraenkter Statusautomat: `transitionTaskStatus`
-- Event-Ausgabe: `listTaskEvents`
+Diese Punkte werden vor beziehungsweise gemeinsam mit dem MCP-Server gemäß
+[ROADMAP.md](./ROADMAP.md) umgesetzt.

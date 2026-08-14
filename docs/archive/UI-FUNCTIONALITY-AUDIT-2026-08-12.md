@@ -1,4 +1,8 @@
-# UI-Funktionalitätsaudit
+# Archiv: UI-Funktionalitätsaudit vom 12.08.2026
+
+> Historischer Auditstand vor der Umsetzung von Runnerstart, Heartbeats, Recovery,
+> Autoprozess und Manager-Orchestrierung. Nicht als aktuellen Funktionsstand verwenden.
+> Siehe [CURRENT-STATUS.md](../CURRENT-STATUS.md) und [ROADMAP.md](../ROADMAP.md).
 
 Stand: 12. August 2026
 

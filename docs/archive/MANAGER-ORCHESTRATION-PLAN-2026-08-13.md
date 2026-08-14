@@ -1,4 +1,7 @@
-# Manager-Orchestrierung und Projektplanung
+# Archiv: Manager-Orchestrierung und Projektplanung
+
+> Historischer Entwurf und Umsetzungsplan vom 13.08.2026. Die Phasen A bis D sind
+> weitgehend umgesetzt. Offene Arbeit wurde in [ROADMAP.md](../ROADMAP.md) konsolidiert.
 
 Stand: 13. August 2026
 

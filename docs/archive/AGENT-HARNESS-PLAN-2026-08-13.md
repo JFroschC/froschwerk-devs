@@ -1,4 +1,8 @@
-# Agent Harness – aktueller Entwicklungsplan
+# Archiv: Agent Harness – Entwicklungsplan vom 13.08.2026
+
+> Historischer Planungsstand. Nicht als aktuelle Roadmap verwenden.
+> Aktueller Stand: [CURRENT-STATUS.md](../CURRENT-STATUS.md).
+> Aktive Planung: [ROADMAP.md](../ROADMAP.md).
 
 ## Ziel
 
@@ -153,4 +157,4 @@ Im UI sind `Ready`, `In Progress`, `Review`, `Testing`, `Changes Requested`, `Bl
 
 ## Nächster sinnvoller Meilenstein
 
-Die minimale automatische Orchestrierung ist vorhanden: Der Workflow startet den Entwicklerprozess, ein erfolgreicher Entwicklerlauf startet den Tester, und der Tester setzt das Ticket auf `Done` oder `Changes Requested`. Der nächste große Ausbau ist die Manager-Orchestrierung mit Projektanalyse, Rückfragen, Planvorschau, Batch-Tickets, Abhängigkeiten und verknüpften Folgeaufgaben. Der vollständige Zielplan steht in [MANAGER-ORCHESTRATION-PLAN.md](MANAGER-ORCHESTRATION-PLAN.md).
+Die minimale automatische Orchestrierung ist vorhanden: Der Workflow startet den Entwicklerprozess, ein erfolgreicher Entwicklerlauf startet den Tester, und der Tester setzt das Ticket auf `Done` oder `Changes Requested`. Der nächste große Ausbau ist die Manager-Orchestrierung mit Projektanalyse, Rückfragen, Planvorschau, Batch-Tickets, Abhängigkeiten und verknüpften Folgeaufgaben. Der damalige Zielplan steht im [archivierten Manager-Orchestrierungsplan](./MANAGER-ORCHESTRATION-PLAN-2026-08-13.md).

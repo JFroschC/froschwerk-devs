@@ -1,4 +1,7 @@
-# Agenten und Provider-Zuordnung
+# Archiv: Agenten und Provider-Zuordnung vom 12.08.2026
+
+> Historischer Stand. Die gültigen Inhalte wurden in
+> [PROVIDERS.md](../PROVIDERS.md) zusammengeführt.
 
 Die Zuordnung wird in SQLite in `agents.provider` gespeichert und kann im Board pro Agent geändert werden.
 

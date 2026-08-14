@@ -1,35 +1,125 @@
-# Harness – aktueller Status
+# Aktueller Stand
 
-Stand: 13. August 2026
+Stand: 14. August 2026
 
-## Manager-Orchestrierung (Phase A–D)
+Dieses Dokument ist die zentrale Quelle für den verifizierten Ist-Zustand des
+Froschwerk Agent Harness. Zukunftsarbeit gehört in [ROADMAP.md](./ROADMAP.md);
+historische Entwürfe und Audits liegen unter [archive/](./archive/README.md).
 
-Die Phasen A bis D aus `MANAGER-ORCHESTRATION-PLAN.md` sind implementiert.
+## Verifizierter Ausgangspunkt
 
-- Mira verwendet ein serverseitig validiertes Antwortschema v2 mit Modus, Rückfragen, Annahmen, Risiken und mehreren Aktionen.
-- Gesprächszustände, Fragen, Antworten und Manager-Entscheidungen werden projektgebunden persistent gespeichert.
-- Die Read-only-Projektanalyse erstellt begrenzte Snapshots des aktiven Workspaces. Secret-Dateien, große Dateien und ausgeschlossene Verzeichnisse gelangen nicht in den Manager-Kontext.
-- Ticketpläne werden als bearbeitbare Vorschau gespeichert. Bestätigungen legen alle Tickets, Parent-/Child-Beziehungen und Abhängigkeiten atomar an oder gar nicht.
-- Zyklische, projektfremde oder unvollständige Vorschläge werden vor der Ausführung abgelehnt.
-- Planfortschritt wird aus den erzeugten Teilaufgaben berechnet.
-- Entwickler und Tester arbeiten die bestätigten Tickets über die normalen AgentRuns ab.
-- Beim Aktivieren oder Serverneustart übernimmt der Autoprozess sofort wartende `Review`- oder `Ready`-Tickets und arbeitet sie sequenziell ab.
-- Entwickler- und Testerprozesse erneuern Leases. Verwaiste Runs werden wiederhergestellt; Retries, Tester-Recoveries und verschachtelte Folgefehler sind begrenzt.
-- Der getrennte Windows-Benutzer erhält pro Child-Prozess ein isoliertes Git-`safe.directory`, ein konsistentes Benutzerprofil und einen verpflichtenden Laufzeitcheck.
-- Bei `Changes Requested` oder `Blocked` wird eine verknüpfte Folgeaufgabe als neuer, bestätigungspflichtiger Plan vorbereitet.
+- Git-Baseline: Initial-Commit `cb176550bc70463e44c75c950af04467db312f46`
+  vom 14.08.2026
+- Node.js: `>=22.13.0`
+- `npm.cmd test`: Build erfolgreich, 50 von 50 Tests bestanden
+- `npm.cmd run lint`: erfolgreich
+- separater `tsc --noEmit`-Check: derzeit 48 TypeScript-Fehler
+- die Dokumentationskonsolidierung dieses Stands ist nach dem Initial-Commit entstanden
+  und bis zu einem neuen Commit als Arbeitsänderung sichtbar
 
-## Bedienung
+Der normale `npm.cmd test`-Lauf enthält aktuell keinen vollständigen TypeScript-Check.
+Ein grüner Build beweist daher noch keine TypeScript-Fehlerfreiheit.
 
-1. Im aktiven Projekt `Projekt analysieren` wählen oder Mira schreiben: `Analysiere dieses Projekt und erstelle anschließend einen umsetzbaren Plan.`
-2. Offene Rückfragen in den Karten im Mira-Panel beantworten.
-3. Ticketentwürfe bei Bedarf bearbeiten oder entfernen.
-4. Den Plan bestätigen. Erst dann werden Tickets und Abhängigkeiten angelegt.
-5. Den Autoprozess im Mira-Panel aktivieren. Er startet beziehungsweise übernimmt sofort die nächste wartende Aufgabe.
+## Implementiert
 
-## Validierung
+### Projekt und Board
 
-`npm.cmd test` führt Build und die vollständige Node-Testsuite aus. Sie deckt Manager-Schema, Gesprächszustand, Batch-Anlage, Abhängigkeitszyklen, Folgeaufgaben, Secret-sichere Analyse, Runner-Syntax, Leases, Recovery, Retry-Grenzen, Auto-Auswahl sowie isolierte Entwickler-/Tester-Smoke-Flows ab. `npm.cmd run lint` ist ebenfalls fehlerfrei.
+- mehrere lokale Projekte mit eigenem Workspace, Board und Mira-Chat
+- Tickets mit Status, Priorität, Akzeptanzkriterien, Parent-/Child-Beziehungen,
+  Abhängigkeiten und Planreihenfolge
+- Kommentare, Task-Events und atomare Ticket-Claims
+- Projektanlage, -bearbeitung, -auswahl und -archivierung
 
-## Nächste offene Phasen
+### Manager-Orchestrierung
 
-Aus Phase E und F bleiben vor allem Run-Detailansichten, Artefakte, Evals sowie Backup/Restore offen. Heartbeats, Prozess-Recovery und die für den Autoprozess nötige Wiederaufnahme sind implementiert.
+Die ehemaligen Manager-Phasen A bis D sind weitgehend umgesetzt:
+
+- validiertes Antwortschema v2
+- persistente Gespräche, Rückfragen und Antworten
+- begrenzte Read-only-Projektanalyse mit Secret- und Größenfiltern
+- Planvorschau mit Bearbeiten, Entfernen und Bestätigen
+- atomare Anlage mehrerer Tickets einschließlich Abhängigkeiten
+- Planfortschritt und verknüpfte Folgeaufgaben
+- kontrollierte Übergabe an Entwickler und Tester
+
+Der automatische Ablauf unterstützt Abhängigkeiten, arbeitet aber derzeit bewusst
+sequenziell. Ein aktiver Run blockiert den Start eines weiteren automatischen Runs.
+
+### Entwickler, Tester und Lifecycle-Basis
+
+- Codex- und Claude-Runner mit lokalen Abo-Logins
+- AgentRuns und AgentRequests mit Provider-, Modell-, Dauer- und Usage-Daten
+- Leases mit standardmäßig 120 Sekunden TTL
+- Lease-Erneuerung alle 30 Sekunden durch Entwickler und Tester
+- Idle- und Gesamttimeouts
+- begrenzte Entwickler-Retries und Tester-Recovery
+- Erkennung verwaister Runs beim Start und bei Workflow-/Boardzugriffen
+- Windows-Prozessbaum-Abbruch
+- vollständiges Projekt-Testgate vor `Review`
+- zentrale Tester-Suite mit TestReport und Folgeaufgaben bei Produktfehlern
+
+Die vorhandene Lease-Erneuerung ist eine technische Heartbeat-Basis, aber noch kein
+vollständiges Lifecycle-Management. Es fehlen insbesondere explizite
+Heartbeat-/Aktivitätszeitpunkte, ein dauerhafter Supervisor und klar getrennte Zustände
+für Start, Abbruch, Timeout und verlorene Prozesse.
+
+### Oberfläche
+
+- Board, Ticketdetail, Projekte, Chat und Providerwahl
+- Entwickler- und Testerstart für ein ausgewähltes Ticket
+- Abbruch eines ausgewählten aktiven Runs
+- Request-/Tokenübersicht
+- automatischer Abgleich mit SQLite alle zwei Sekunden
+- knappe Anzeige des aktuellen Runs beziehungsweise letzten Testergebnisses
+
+Noch nicht vorhanden sind eine Agenten-Detailseite, vollständige Run-Historie,
+Lease-/Heartbeat-Anzeige, Run-Logs, Testchecks und eine echte Artefaktansicht.
+
+### MCP
+
+Der Tool-Vertrag und die lokalen DB-Funktionen zum Lesen, Kommentieren, eingeschränkten
+Statuswechsel und Auflisten von Runs existieren. Ein ausführbarer MCP-Server-Adapter
+ist noch nicht implementiert.
+
+## Bekannte technische Probleme
+
+1. **TypeScript-Gate fehlt:** `tsc --noEmit` meldet 48 Fehler; der normale Build
+   erkennt sie nicht.
+2. **Provider-Persistenz:** `migrateAgents()` setzt Standardprovider beim Öffnen der
+   Datenbank erneut und kann damit eine gespeicherte UI-Auswahl überschreiben.
+3. **Schema-Drift:** Das Drizzle-Schema bildet nicht alle Felder des autoritativen
+   Runtime-SQL-Schemas ab, unter anderem Planreihenfolge und Obsolet-Markierungen.
+4. **Lifecycle-Integrität:** Finish-, Cancel- und direkte Runnerpfade besitzen noch
+   keine durchgängige, rollenbasierte Zustandsmaschine.
+5. **Agentenstatus:** `agents.status` ist derzeit überwiegend Konfiguration und wird
+   nicht zuverlässig aus aktiven Runs abgeleitet.
+6. **Artefakte:** Die Tabelle existiert, aber es gibt noch keinen Schreib-/Lese-Service
+   und keine UI. Die lokale Datenbank enthielt beim letzten Audit null Artefakte.
+7. **Zeichenkodierung:** Drei sichtbare beziehungsweise promptrelevante Strings enthalten
+   noch Mojibake.
+8. **MCP-Projektpräfix:** Der maschinenlesbare Vertrag akzeptiert derzeit nur
+   `FW-...`, obwohl reale Projekte andere Schlüssel wie `FBT-...` verwenden.
+
+Die priorisierte Behebung steht in [ROADMAP.md](./ROADMAP.md).
+
+## Operativer Boardzustand
+
+Die [Übergabe vom 13.08.2026](./UEBERGABE-2026-08-13.md) ist noch relevant:
+
+- Projekt `FroschwerkBusinessTool`
+- Autoprozess deaktiviert
+- keine aktiven Runs beim letzten Abgleich
+- `FBT-477-A56D – Echter Datei-Upload` weiterhin in `Review`
+
+Vor einer erneuten Aktivierung des Autoprozesses müssen die dort beschriebenen
+Testannahmen und Cleanup-Pfade korrigiert und die vollständige Produktsuite erneut
+ausgeführt werden.
+
+## Bewusste Betriebsgrenzen
+
+- Die API ist lokal, nicht authentifiziert und nur für `127.0.0.1` vorgesehen.
+- Provider-Zugangsdaten werden nicht gespeichert.
+- Für den Abo-Betrieb bleiben `OPENAI_API_KEY` und `ANTHROPIC_API_KEY` leer.
+- Automatische Parallelisierung über mehrere Entwickler ist noch nicht implementiert.
+- Parallele Produktänderungen besitzen noch keine Worktree-Isolation.
+- Backup/Restore, Evals, Streaming und Zugriffsschutz sind offen.

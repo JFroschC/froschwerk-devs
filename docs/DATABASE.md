@@ -1,65 +1,165 @@
-# SQLite-Datenbank
+# SQLite und Datenmodell
 
-## Lokaler Betrieb
+Stand: 14. August 2026
 
-`npm.cmd run dev` startet:
+## Autoritative Laufzeit
 
-- Vinext-Frontend auf `http://localhost:3000`
-- lokale Node-SQLite-API auf `http://127.0.0.1:3001`
+Die lokale SQLite-Datenbank ist die autoritative Datenquelle für Projekte, Tickets,
+Workflowzustände und Agentenläufe. Sie liegt standardmäßig unter
+`.data/harness.sqlite`; `HARNESS_DB_PATH` kann den Pfad überschreiben.
 
-Die Datenbank wird beim ersten Zugriff unter `.data/harness.sqlite` angelegt. Der Pfad kann mit `HARNESS_DB_PATH` überschrieben werden. `.data` ist von Git ausgeschlossen.
+Die Runtime verwendet Node `node:sqlite` mit:
 
-Die Runtime verwendet Node `node:sqlite` mit WAL-Modus, Foreign Keys und Busy Timeout. Das Schema wird beim Start erstellt. Bestehende Datenbanken werden minimal migriert; aktuell betrifft das vor allem die Spalte `agents.provider`.
+- WAL-Modus
+- aktivierten Foreign Keys
+- fünf Sekunden Busy Timeout
+- Schemaerstellung und additiven Migrationen beim Öffnen der Datenbank
+
+Das tatsächlich ausgeführte Schema steht derzeit in `db/local.ts`. `db/schema.ts`
+spiegelt das Modell für Drizzle und eine mögliche spätere D1-Nutzung, ist aber aktuell
+nicht vollständig synchron. Diese bekannte Drift ist als Priorität 0 in
+[ROADMAP.md](./ROADMAP.md) erfasst. Im Verzeichnis `drizzle/` existiert noch keine
+vollständige versionierte Migrationshistorie.
 
 ## Tabellen
 
-- `projects`: gekapselte Produkte/Arbeitsbereiche mit Typ, Workspace-Pfad, Start-/Testbefehlen und Archivstatus
-- `agents`: Name, Rolle, Provider, Status und `max_concurrency`
-- `tasks`: Titel, Beschreibung, Status, Priorität, Zuweisung, Retries und aktiver Lauf
-- `task_acceptance_criteria`: prüfbare Anforderungen pro Ticket
-- `task_dependencies`: Ticketabhängigkeiten
-- `comments`: Benutzer-, Manager-, Entwickler- und Tester-Kommentare
-- `agent_runs`: queued/running/succeeded/failed-Läufe
-- `agent_leases`: exklusive, zeitlich begrenzte Ticketreservierungen
-- `task_events`: Workflow-Historie
-- `test_reports`: Pass/Fail, Checks, Logs und Zusammenfassung; wird nach einem Tester-Run erzeugt
-- `tasks.plan_sequence` und `manager_plan_tasks.sequence`: explizite fachliche Reihenfolge eines Manager-Plans
-- `artifacts`: Pfade zu Diffs, Logs und Screenshots
-- `chat_messages`: persistenter, projektbezogener Manager-Chat
+### Projekte und Agenten
 
-## Parallelität
+- `projects`: Projektkennung, Workspace, Start-/Testbefehl, Autoprozess und Archivstatus
+- `agents`: Rolle, Provider, konfigurierter Status und Kapazitätslimit
 
-Der Claim läuft in einer SQLite-Transaktion mit `BEGIN IMMEDIATE`. Dabei werden abgelaufene Leases behandelt, die Kapazität des Agenten geprüft und das nächste passende Ready-Ticket reserviert.
+Der aktuelle Wert von `agents.status` ist noch kein belastbarer Laufzeitstatus. Eine
+Ableitung aus aktiven Runs ist Teil des nächsten Lifecycle-Meilensteins.
 
-Damit zwei Entwickler parallel arbeiten können, ruft jeder Prozess `claimNextTask(agentId)` mit einer eigenen Agent-ID auf. SQLite verhindert, dass dasselbe Ticket doppelt geclaimt wird. Die Agenten `agent-developer-1` und `agent-developer-2` sind bereits angelegt.
+### Tickets und Workflow
 
-### Plan-Reihenfolge
+- `tasks`: Beschreibung, Status, Priorität, Zuweisung, aktiver Run, Retry-Grenzen,
+  Parent, Plan, Planreihenfolge, Herkunft und Obsolet-Markierung
+- `task_acceptance_criteria`: sortierte Akzeptanzkriterien
+- `task_dependencies`: harte Ticketabhängigkeiten
+- `comments`: Benutzer-, Manager-, Entwickler- und Testerkommentare
+- `task_events`: nachvollziehbare Workflow- und MCP-Ereignisse
 
-Manager-Pläne verwenden eine positive `sequence`, üblicherweise 10, 20, 30. Beim Bestätigen wird sie als `plan_sequence` am Ticket gespeichert. Der Entwickler-Claim berücksichtigt zuerst Tickets mit Plan-Reihenfolge und sortiert diese nach `plan_sequence`; bei gleicher Reihenfolge gelten Priorität und Erstellzeitpunkt als Tie-Breaker. Tickets ohne Plan verwenden weiterhin Priorität und danach Erstellzeitpunkt. Abhängigkeiten bleiben harte Voraussetzungen und können ein Ticket trotz früherer sequence blockieren.
+### Runs, Requests und Ergebnisse
 
-## Relevante API-Routen
+- `agent_runs`: Rolle, Zustand, Versuch, Ein-/Ausgabe, Zusammenfassung, Fehler, PID
+  und Zeitpunkte
+- `agent_leases`: exklusive Reservierung eines Tickets mit Ablaufzeit
+- `agent_requests`: einzelne Provider- oder lokale Testanfragen einschließlich Modell,
+  Kommando, Dauer, Tokenwerten, Vorschauen und Fehlern
+- `test_reports`: Testerstatus, Checks, Logs und Zusammenfassung
+- `artifacts`: vorbereitete Metadaten für Diffs, Logs und Screenshots
 
-- `GET /api/health/db`: Datenbankstatus und Tabellenzähler
-- `GET /api/agents`: Agenten inklusive Provider-Zuordnung
-- `PATCH /api/agents/:id`: Provider eines Agenten ändern
-- `GET /api/providers`: lokale CLI-Installation und Loginstatus
-- `GET/POST /api/tasks`: Tickets lesen und anlegen
-- `PATCH /api/tasks/:id`: Status, Priorität oder Zuweisung ändern
-- `POST /api/tasks/:id`: Kommentar speichern
-- `POST /api/workflow/next`: nächstes Ticket atomar claimen
-- `POST /api/workflow/test`: Review-Ticket für den Tester claimen und Testerprozess starten
-- `POST /api/agent-runs/:id/finish`: Lauf beenden und Lease freigeben
-- `POST /api/test-runs/:id/finish`: Testergebnis speichern und Ticket auf `Done` oder `Changes Requested` setzen
-- `GET /api/agent-runs`: AgentRuns für Statusanzeigen
-- `GET/POST /api/chat`: Chatverlauf lesen und Nachricht speichern
-- `POST /api/chat/manager`: freie Frage über Miras lokalen Provider beantworten
+Die Artefakttabelle besitzt noch keinen produktiven Schreib-/Lese-Service.
 
-## Noch offene Datenbankthemen
+### Manager und Planung
 
-- Testberichte und Artefakte vollständig in der UI anzeigen
-- strukturierte Agentenoutputs speichern und durchsuchen
-- Heartbeat-/Timeout-Felder für laufende Prozesse
-- echte Status-Transitionsregeln statt freier Statusstrings
-- Backup, Restore und Datenbankmigrationen mit Versionshistorie
+- `chat_messages`: projektgebundener Mira-Chat
+- `manager_conversations`: persistenter Gesprächszustand
+- `manager_conversation_entries`: strukturierte Gesprächseinträge
+- `manager_questions`: offene und beantwortete Rückfragen
+- `project_analysis_snapshots`: begrenzte Read-only-Projektanalysen
+- `manager_plans`: Planvorschau, Status, Annahmen, Risiken und Aktionen
+- `manager_plan_tasks`: Ticketentwürfe, Reihenfolge, Parent- und Abhängigkeitsangaben
 
-Die API ist aktuell lokal und ohne Authentifizierung. Sie ist nicht für öffentliche Erreichbarkeit vorgesehen.
+## Claims und Parallelität
+
+Ein Entwickler-Claim läuft in einer SQLite-Transaktion mit `BEGIN IMMEDIATE`.
+Dabei werden geprüft:
+
+1. Agent und Kapazitätslimit
+2. Ticketstatus und fehlender aktiver Run
+3. Retry-Grenze
+4. erfüllte Abhängigkeiten
+5. Planreihenfolge, Priorität und Erstellzeit
+
+Der Claim setzt das Ticket atomar auf `In Progress`, legt einen `agent_run` an und
+erzeugt genau eine Lease für Ticket und Run. Testerläufe verwenden dasselbe Prinzip
+für ein Ticket in `Review`.
+
+Die Datenbasis kann mehrere manuelle Claims tragen. Der automatische Scheduler ist
+derzeit sequenziell und wartet, sobald irgendein Run des Projekts aktiv ist.
+
+## Lease, Heartbeat und Recovery
+
+- Standard-TTL: 120 Sekunden über `AGENT_LEASE_TTL_MS`
+- Entwickler und Tester erneuern ihre Lease alle 30 Sekunden
+- fehlende oder abgelaufene Leases werden beim Lesen, Claimen und beim Start des
+  Autoprozesses wiederhergestellt
+- Entwicklerfehler erhöhen begrenzt `retry_count`
+- Tester-Recovery ist über `TESTER_RECOVERY_LIMIT` begrenzt
+- User-Cancel soll keine technische Retry-Grenze verbrauchen
+
+Die Lease-Erneuerung ist die bestehende Heartbeat-Basis. Noch fehlen ein explizites
+`last_heartbeat_at`, Aktivitäts- und Phaseninformationen sowie ein periodischer
+Supervisor. Außerdem muss Recovery künftig einen möglicherweise noch lebenden Prozess
+beenden, bevor das Ticket erneut freigegeben wird.
+
+## Statusmodelle
+
+Ticketstatus:
+
+`Ready → In Progress → Review → Testing → Done`
+
+Fehlerpfade:
+
+- `In Progress → Ready` oder `Blocked`
+- `Testing → Changes Requested` oder `Blocked`
+- `Changes Requested → In Progress`
+- `Blocked → Ready` nach bewusster Freigabe
+
+AgentRuns verwenden derzeit hauptsächlich
+`running`, `succeeded`, `failed` und `blocked`. Ein vollständiger
+Run-Zustandsautomat mit Start-, Cancel-, Timeout- und Lost-Zuständen ist noch offen.
+
+## API-Überblick
+
+### System und Konfiguration
+
+- `GET /api/health/db`
+- `GET /api/health/runtime`
+- `GET /api/providers`
+- `GET /api/agents`
+- `PATCH /api/agents/:id`
+
+### Projekte und Tickets
+
+- `GET/POST /api/projects`
+- `PATCH /api/projects/:id`
+- `GET/POST /api/tasks`
+- `GET/PATCH/POST /api/tasks/:id`
+
+### Runs und Workflow
+
+- `GET /api/agent-runs`
+- `GET /api/agent-requests`
+- `POST /api/agent-runs/:id/cancel`
+- `POST /api/agent-runs/:id/finish`
+- `POST /api/test-runs/:id/finish`
+- `POST /api/workflow/next`
+- `POST /api/workflow/test`
+- `POST /api/workflow/advance`
+
+### Manager
+
+- `GET/POST /api/chat`
+- `POST /api/chat/manager`
+- `POST /api/manager/analyze`
+- `GET /api/manager/state`
+- `POST /api/manager/plans/:id/confirm`
+- `POST /api/manager/plans/:id/discard`
+- `PATCH/DELETE /api/manager/plans/:id/tasks/:taskId`
+
+## Offene Datenbankarbeit
+
+- Runtime- und Drizzle-Schema synchronisieren
+- versionierte Migrationen einführen
+- Lifecycle-Zeitpunkte und Zustandsautomat ergänzen
+- Finish-/Cancel-Transitionen rollenbasiert validieren
+- Artefakt-Services und API implementieren
+- Backup und Restore ergänzen
+
+## Sicherheitsgrenze
+
+Die API lauscht lokal auf `127.0.0.1`, besitzt keine Authentifizierung und ist nicht
+für öffentliche oder produktive Netzfreigaben vorgesehen.

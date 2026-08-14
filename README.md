@@ -1,60 +1,78 @@
 # Froschwerk Agent Harness
 
-Lokales Multi-Agent-Taskboard für einen Manager, mehrere Entwickler und Tester.
+Lokales Multi-Agent-Taskboard für einen Manager, mehrere Entwickler und Tester. Der
+Harness verwaltet Projekte, Tickets, Abhängigkeiten, Agentenläufe und Testergebnisse
+in einer lokalen SQLite-Datenbank und startet Codex beziehungsweise Claude Code über
+deren lokale Abo-Logins.
 
-## Was ist bereits vorhanden?
+## Was ist vorhanden?
 
-- lokales Board mit Tickets, Status, Priorität und Detailansicht
-- Kommentare und persistenter Manager-Chat
-- SQLite als autoritative Datenquelle
-- Agenten mit Rollen, Kapazitätslimit und Provider-Zuordnung
-- Codex- und Claude-Code-Loginstatus in der Oberfläche
-- lokaler Mira-Runner über das vorhandene ChatGPT-/Codex- oder Claude-Abo
-- atomare Ticket-Claims, AgentRuns, Leases und Task-Events
-- robuster Entwickler- und Tester-Runner für Codex und Claude mit Heartbeats, Recovery und begrenzten Retries
-- sequenzieller Autoprozess, der `Review` vor `Ready` übernimmt und nach einem Harness-Neustart fortsetzt
-- isoliertes Git-Vertrauen für Workspaces, die einem anderen Windows-Benutzer gehören
-- vorbereiteter MCP-Tool-Vertrag für Ticket lesen, kommentieren und eingeschränkte Statuswechsel
+- Projektverwaltung mit getrennten Workspaces, Boards und Mira-Chats
+- Ticketboard mit Status, Priorität, Akzeptanzkriterien, Kommentaren und Abhängigkeiten
+- SQLite als autoritative Laufzeit-Datenquelle
+- Manager-Orchestrierung mit Projektanalyse, Rückfragen, Planvorschau und atomarer
+  Ticketanlage
+- Entwickler- und Tester-Runner für Codex und Claude Code
+- AgentRuns, AgentRequests, Leases, Task-Events und TestReports
+- Lease-Erneuerung, Timeouts, begrenzte Retries und Recovery nach Prozessabbrüchen
+- sequenzieller Autoprozess: `Review → Tester → Done → nächstes Ready → Entwickler → Review`
+- vollständiges Projekt-Testgate vor der Übergabe eines Entwicklerlaufs an den Tester
+- isoliertes Git-Vertrauen für Workspaces eines getrennten Windows-Benutzers
+- vorbereiteter MCP-Tool-Vertrag; ein ausführbarer MCP-Server ist noch nicht enthalten
 
-## Was ist noch nicht fertig?
+Der Manager- und Workflow-Kern ist nutzbar. Der nächste Ausbau ist nicht ein erster
+Heartbeat, sondern ein vollständiges Agent-Lifecycle-Management mit klaren
+Run-Zuständen, Supervisor, Run-Details und sicheren Stop-/Retry-Abläufen.
 
-Die Kette „Mira → Entwickler → Tester → nächstes Ticket“ ist lokal verdrahtet und gegen Prozessabbrüche abgesichert. Noch offen sind vor allem Run-Detailansichten, Artefakte, Live-Streaming und Backup/Restore; sie blockieren die automatische Abarbeitung nicht.
+Den verifizierten Stand und bekannte Einschränkungen beschreibt
+[CURRENT-STATUS.md](./docs/CURRENT-STATUS.md). Die priorisierten nächsten Schritte
+stehen in [ROADMAP.md](./docs/ROADMAP.md).
+
+## Voraussetzungen
+
+- Windows für den vorgesehenen getrennten Agentenbetrieb
+- Node.js `>=22.13.0`
+- lokal installierte und angemeldete Codex- beziehungsweise Claude-Code-CLI
+- keine API-Keys für den Abo-Betrieb
 
 ## Starten
 
-Voraussetzung: Node.js `>=22.13.0`.
+Für den getrennten Benutzer `FroschAgent`:
 
-Unter Windows wird der getrennte Benutzer `FroschAgent` empfohlen:
+1. Einmal `setup-froschwerk-agent.bat` ausführen.
+2. Codex beziehungsweise Claude Code lokal anmelden.
+3. Den Laufzeitcheck erfolgreich abschließen.
+4. Danach den Harness über `start-froschwerk-agent.bat` starten.
 
-1. Einmal `setup-froschwerk-agent.bat` starten, Codex installieren/anmelden und den Laufzeitcheck erfolgreich abschließen.
-2. Danach den Harness immer über `start-froschwerk-agent.bat` starten.
-3. Im Board beim gewünschten Projekt den Autoprozess mit „aktivieren und starten“ einschalten.
-
-Der Start führt `harness:doctor` aus und bricht mit einer konkreten Diagnose ab, wenn Datenbank, Workspace, Git, Provider-Login oder Profilverzeichnisse nicht funktionieren. `HOME`, `USERPROFILE` und `CODEX_HOME` werden auf das Profil von `FroschAgent` vereinheitlicht. Git erhält `safe.directory` ausschließlich in der Umgebung des jeweiligen Child-Prozesses; die globale Git-Konfiguration wird nicht verändert.
+Direkter Entwicklungsstart:
 
 ```powershell
 npm.cmd install
 npm.cmd run dev
 ```
 
-Danach:
+Danach sind erreichbar:
 
 - Frontend: `http://localhost:3000`
 - lokale API: `http://127.0.0.1:3001`
 
+Der Start führt `harness:doctor` aus. Er bricht mit einer Diagnose ab, wenn
+Datenbank, Workspace, Git-Vertrauen, Provider-Login oder Profilverzeichnisse nicht
+funktionieren. `HOME`, `USERPROFILE` und `CODEX_HOME` werden für Child-Prozesse
+konsistent gesetzt. Git-`safe.directory` wird nur im jeweiligen Child-Environment
+gesetzt; die globale Git-Konfiguration bleibt unverändert.
+
 ## Autoprozess
 
-Beim Aktivieren startet der Harness sofort das nächste wartende Ticket. Die Reihenfolge ist:
+Der Autoprozess ist projektbezogen und standardmäßig deaktiviert. Beim Aktivieren
+übernimmt er zunächst ein wartendes `Review`-Ticket, danach das nächste ausführbare
+`Ready`-Ticket. Solange ein Run aktiv ist, startet er keinen weiteren automatischen
+Run; der automatische Pfad ist damit derzeit bewusst sequenziell.
 
-`Review → Tester → Done → nächstes Ready → Entwickler → Review`
-
-Laufende Prozesse erneuern ihre Lease alle 30 Sekunden. Nach einem Abbruch werden Entwicklerläufe begrenzt erneut versucht und Testerlauf-Recoveries ebenfalls begrenzt. Wiederholte Tester-Fehler erzeugen höchstens drei Folgefehlerstufen; danach wird das Ticket nachvollziehbar blockiert, statt endlos weiterzulaufen. Beim Neustart erkennt der API-Prozess verwaiste Runs und setzt aktivierte Autoprozesse fort.
-
-Manueller Laufzeitcheck:
-
-```powershell
-npm.cmd run harness:doctor
-```
+Entwickler und Tester verlängern ihre Lease alle 30 Sekunden. Die Standard-TTL beträgt
+120 Sekunden. Abgelaufene Leases und verwaiste Prozesse werden begrenzt wiederhergestellt.
+Das ist die vorhandene technische Heartbeat-Basis; eine sichtbare
+`lastHeartbeatAt`-/Lifecycle-Historie fehlt noch.
 
 ## Provider prüfen
 
@@ -62,35 +80,30 @@ npm.cmd run harness:doctor
 npm.cmd run providers:check
 ```
 
-Die App verwendet die lokalen Logins der CLIs. Für Codex muss `OPENAI_API_KEY` leer sein, für Claude `ANTHROPIC_API_KEY`. Die Logins werden nicht in diesem Repository gespeichert.
+Die App verwendet die lokalen CLI-Logins. Für den Abo-Betrieb müssen
+`OPENAI_API_KEY` und `ANTHROPIC_API_KEY` leer sein. Zugangsdaten werden nicht in
+diesem Repository gespeichert. Details stehen in [PROVIDERS.md](./docs/PROVIDERS.md).
 
-## Entwickler manuell starten
+## Laufzeit prüfen
 
 ```powershell
-node --experimental-strip-types scripts/run-agent.mjs --agent agent-developer-1
-node --experimental-strip-types scripts/run-agent.mjs --agent agent-developer-2
+npm.cmd run harness:doctor
 ```
-
-Die Provider-Zuordnung kann im Board geändert werden. Details stehen in:
-
-- [aktueller Entwicklungsplan](./docs/AGENT-HARNESS-PLAN.md)
-- [Provider-Anbindung](./docs/PROVIDERS.md)
-- [Agenten-Provider-Zuordnung](./docs/PROVIDER-ASSIGNMENT.md)
-- [SQLite-Dokumentation](./docs/DATABASE.md)
-- [MCP-Tool-Vertrag](./docs/MCP-TOOLS.md)
-- [UI-Funktionalitätsaudit](./docs/UI-FUNCTIONALITY-AUDIT.md)
 
 ## Kontrollierte Codex-Schreibprobe
 
-`start-froschwerk-agent.bat` fragt vor dem Harness-Start nach dem jeweiligen Projekt-Workspace und führt die Probe aus. Bei einem Fehlschlag startet der Harness nicht. Ein leerer Wert überspringt sie bewusst. Für einen nicht-interaktiven Start kann der Workspace über `FROSCH_AGENT_WRITE_PROBE_WORKSPACE` gesetzt werden. Die Probe verlangt explizit `FroschAgent` und startet Codex mit `--cd`, `--add-dir`, `--approve-for-me` und `--ignore-rules`. In Codex CLI 0.147 aktiviert `--approve-for-me` selbst den Workspace-Write-Modus und darf deshalb nicht zusätzlich mit `--sandbox` kombiniert werden. Lokales Regelwerk wird nicht zusätzlich angewandt. Die Probe lässt ausschließlich eine temporäre Prüfdokumentdatei ändern, prüft deren Inhalt nach Prozessende und entfernt sie danach wieder.
+Die Schreibprobe prüft vor dem Harness-Start, ob der getrennte Benutzer im gewählten
+Projekt-Workspace tatsächlich schreiben kann. Sie darf ausschließlich eine temporäre
+Prüfdatei ändern und entfernt diese anschließend.
 
 ```powershell
 npm.cmd run codex:verify-write -- --workspace "C:\Users\FroschiO\Froschwerk NEU\FroschwerkCRM-BusinessTool"
 ```
 
-Die JSON-Ausgabe muss `ok: true`, `persistedBeforeCleanup: true` und `cleanedUp: true` enthalten. Eine fehlgeschlagene Probe lässt keine Produktänderung zurück.
+Die JSON-Ausgabe muss `ok: true`, `persistedBeforeCleanup: true` und
+`cleanedUp: true` enthalten.
 
-## Checks
+## Qualitätsprüfungen
 
 ```powershell
 npm.cmd run lint
@@ -98,8 +111,25 @@ npm.cmd test
 npm.cmd run build
 ```
 
-Die Tests prüfen zusätzlich die Syntax aller ausführbaren Harness-Skripte sowie isolierte Entwickler- und Tester-Runner-Smoke-Flows gegen temporäre SQLite-Datenbanken und eine lokale Fake-CLI.
+`npm.cmd test` führt bereits den Produktions-Build und die vollständige
+Node-Test-Suite aus. Ein separater TypeScript-Check ist momentan noch nicht Teil
+dieses Gates; die bekannte Lücke ist in [CURRENT-STATUS.md](./docs/CURRENT-STATUS.md)
+und [ROADMAP.md](./docs/ROADMAP.md) dokumentiert.
+
+## Dokumentation
+
+- [Aktueller Stand](./docs/CURRENT-STATUS.md)
+- [Roadmap](./docs/ROADMAP.md)
+- [SQLite und Datenmodell](./docs/DATABASE.md)
+- [Provider und Agentenzuordnung](./docs/PROVIDERS.md)
+- [MCP-Tool-Vertrag](./docs/MCP-TOOLS.md)
+- [Operative Übergabe vom 13.08.2026](./docs/UEBERGABE-2026-08-13.md)
+- [Historische Dokumente](./docs/archive/README.md)
 
 ## Sicherheitsgrenzen
 
-Der lokale API-Service ist ohne Authentifizierung und nur für den lokalen Rechner vorgesehen. Destruktive, externe oder produktive Aktionen brauchen später explizite Freigaben. Die Datenbank liegt lokal unter `.data/harness.sqlite` und ist von Git ausgeschlossen.
+- Die lokale API lauscht nur auf `127.0.0.1` und besitzt keine Authentifizierung.
+- Der Harness ist nicht für eine öffentliche oder produktive Netzfreigabe vorgesehen.
+- Agenten arbeiten ausschließlich im konfigurierten Projekt-Workspace.
+- Destruktive, externe oder produktive Aktionen benötigen eine ausdrückliche Freigabe.
+- Die Datenbank liegt unter `.data/harness.sqlite` und wird nicht in Git gespeichert.
