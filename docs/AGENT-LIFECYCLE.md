@@ -1,6 +1,6 @@
 # Agent Lifecycle Contract
 
-Stand: 14. August 2026
+Stand: 15. August 2026
 
 `db/agent-lifecycle.ts` ist die verbindliche, providerneutrale Kapselung des
 Run-Lifecycles. Neue Runner, Provider-Adapter und der spätere Supervisor dürfen
@@ -52,11 +52,35 @@ Benutzerabbrüche enden mit `cancelled` und verbrauchen keine technische
 Recovery-Grenze. Lease- und Prozessverluste enden mit `lost`; fachliche Fehler mit
 `failed`. Wiederholtes Sweepen ist idempotent.
 
+## Benutzeraktionen und Auditspur
+
+Start, Stop und Retry werden über die serverseitige Aktionsschicht angefordert. Die
+Oberfläche zeigt vor jeder Aktion eine zustandsabhängige Bestätigung, führt aber keine
+Transition selbst aus. Die lokalen Endpunkte sind:
+
+- `POST /api/tasks/:id/run-action` mit `action: "start" | "retry"`, Rolle und
+  `confirmation: "confirmed" | "declined"`;
+- `POST /api/agent-runs/:id/action` mit `action: "stop"` und derselben Bestätigung.
+
+`recordRunActionAudit` schreibt die Benutzerentscheidung als
+`agent.action_confirmed`, `agent.action_declined`, `agent.action_rejected` oder
+`agent.action_accepted` in `task_events`. Die nachfolgenden Lifecycle-Events bleiben
+separate, kanonische Transitionen. Dadurch sind Doppelklicks und veraltete Ansichten
+serverseitig eindeutig abweisbar und nach dem Polling wieder konsistent sichtbar.
+
+Retry verlangt einen terminalen Vorgänger mit `failed`, `timed_out`, `cancelled` oder
+`lost`, dieselbe Ticket- und Runnerrolle sowie einen aktuell startbaren Ticketstatus.
+Er erstellt danach ausschließlich einen neuen Run. Ein aktiver oder `cancelling`-Run
+bleibt immer startblockierend, bis der Supervisor beziehungsweise der Runner sein
+Prozessende bestätigt hat.
+
 ## Zuständigkeiten
 
 - `db/local.ts`: atomare Persistenz, Transitionen und Reporting-Funktionen.
 - `scripts/workflow-orchestrator.mjs`: Startzustand, registrierte PID,
   Supervisor und Stop-Eskalation.
+- `scripts/run-actions.mjs`: serverseitige Prüfung und Auditierung von
+  Benutzeraktionen.
 - `scripts/run-agent.mjs`, `scripts/run-tester.mjs`: melden `running`,
   Aktivität und Heartbeats.
 - `scripts/process-identity.mjs`: sichere Prozessprüfung anhand von PID und

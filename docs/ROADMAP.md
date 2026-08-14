@@ -24,7 +24,6 @@ Diese Punkte werden vor neuen Lifecycle-Funktionen erledigt:
 - [x] direkten `--task`-Runnerpfad ohne gültigen AgentRun verhindern
 - [x] Finish-Endpunkte auf Rolle, aktuellen Runstatus und erlaubten Folgestatus prüfen
 - [x] Testerstart zusätzlich an den aktiven Run des Tickets binden
-- [x] MCP-Ticketpräfix projektunabhängig machen
 
 Abnahme:
 
@@ -106,27 +105,31 @@ Betriebsbedarf bewertet.
 Ziel: Ein laufender oder beendeter AgentRun ist ohne Terminal verständlich und mit
 seinen Requests, Testergebnissen und Ereignissen nachvollziehbar.
 
-- [ ] vorhandene `/api/agent-runs`-Route in den regelmäßigen UI-Sync aufnehmen
-- [ ] Agentenübersicht und Agenten-Detailseite erstellen
-- [ ] Run-Historie mit Zustand, Rolle, Provider, Modell, Versuch und Dauer anzeigen
-- [ ] PID, Prozessidentität, Lease-Ablauf, letzten Heartbeat und letzte Aktivität
+- [x] vorhandene `/api/agent-runs`-Route in den regelmäßigen UI-Sync aufnehmen
+- [x] Agentenübersicht und Agenten-Detailseite erstellen
+- [x] Run-Historie mit Zustand, Rolle, Provider, Modell, Versuch und Dauer anzeigen
+- [x] PID, Prozessidentität, Lease-Ablauf, letzten Heartbeat und letzte Aktivität
   sichtbar machen
-- [ ] aktuelle Phase, Fortschritt, technische Beendigungsursache, Exit-Code und Signal
+- [x] aktuelle Phase, Fortschritt, technische Beendigungsursache, Exit-Code und Signal
   verständlich darstellen
-- [ ] Request-Ausgabe, Zusammenfassung, Fehler und Testchecks am zugehörigen Run
+- [x] Request-Ausgabe, Zusammenfassung, Fehler und Testchecks am zugehörigen Run
   anzeigen
-- [ ] Aktivitätsansicht für Task-Events und Run-Übergänge ergänzen
-- [ ] leere, fehlende oder historisch unvollständige Daten nachvollziehbar kennzeichnen,
+- [x] Aktivitätsansicht für Task-Events und Run-Übergänge ergänzen
+- [x] leere, fehlende oder historisch unvollständige Daten nachvollziehbar kennzeichnen,
   statt einen laufenden Zustand vorzutäuschen
 
 Abnahme Schritt 1:
 
-- Ein Entwickler- oder Tester-Run lässt sich vom Start bis zum Abschluss ohne Terminal
+- [x] Ein Entwickler- oder Tester-Run lässt sich vom Start bis zum Abschluss ohne Terminal
   nachvollziehen.
-- Der Nutzer erkennt innerhalb der Oberfläche, ob ein Agent startet, arbeitet,
+- [x] Der Nutzer erkennt innerhalb der Oberfläche, ob ein Agent startet, arbeitet,
   auf kooperative Beendigung wartet, hängt, verloren ging oder beendet wurde.
-- Die sichtbaren Werte entsprechen den in Prio 1 gespeicherten Lifecycle-Daten; das
+- [x] Die sichtbaren Werte entsprechen den in Prio 1 gespeicherten Lifecycle-Daten; das
   UI erzeugt keine eigene Zustandslogik.
+
+Schritt 1 abgeschlossen am 14. August 2026. Die UI synchronisiert Runs und
+Task-Events weiterhin per Polling. Run-Details werden ausschließlich lesend aus den
+persistierten Lifecycle-, Lease-, Request-, Testreport- und Eventdaten zusammengesetzt.
 
 ### Schritt 2 – Sichere Run-Aktionen und Auditspur
 
@@ -134,17 +137,17 @@ Ziel: Start, Stop und Retry sind verständlich bedienbar, bestätigen ihre Wirku
 erhalten die Integritätsregeln aus Prio 1 auch bei mehrfachen Klicks oder veralteter
 Oberfläche.
 
-- [ ] Start, Stop und Retry mit verständlicher, zustandsabhängiger Bestätigung anbieten
-- [ ] beim Stop den Zwischenzustand `cancelling`, den Grund und die laufende
+- [x] Start, Stop und Retry mit verständlicher, zustandsabhängiger Bestätigung anbieten
+- [x] beim Stop den Zwischenzustand `cancelling`, den Grund und die laufende
   Stop-Eskalation sichtbar halten; das Ticket darf bis zum Terminalzustand nicht als
   erneut startbar erscheinen
-- [ ] Retry ausschließlich über einen neuen Run auslösen; vorherigen Run, Requests,
+- [x] Retry ausschließlich über einen neuen Run auslösen; vorherigen Run, Requests,
   Logs, Testergebnis und Beendigungsursache unverändert als Auditspur behalten
-- [ ] UI-Aktionen gegen veraltete oder bereits terminale Runs serverseitig eindeutig
+- [x] UI-Aktionen gegen veraltete oder bereits terminale Runs serverseitig eindeutig
   ablehnen und die Oberfläche anschließend synchronisieren
-- [ ] jede Benutzeraktion, Bestätigung, Ablehnung und resultierende Transition in der
+- [x] jede Benutzeraktion, Bestätigung, Ablehnung und resultierende Transition in der
   Aktivitätsansicht nachvollziehbar machen
-- [ ] Fehlermeldungen für fehlende Berechtigung, Prozessschutz, Retry-Grenze und
+- [x] Fehlermeldungen für fehlende Berechtigung, Prozessschutz, Retry-Grenze und
   nicht erfüllte Ticketvoraussetzungen verständlich anzeigen
 
 Abnahme Schritt 2:
@@ -155,23 +158,30 @@ Abnahme Schritt 2:
 - Nach Reload, doppeltem Klick oder paralleler UI-Synchronisierung bleibt genau ein
   kanonischer Run-Zustand sichtbar.
 
+Schritt 2 abgeschlossen am 15. August 2026. Start, Stop und Retry laufen über
+serverseitig validierte Aktionsendpunkte. Vor der Ausführung wird die Entscheidung
+bestätigt oder abgelehnt und als Task-Event persistiert; Erfolg, Ablehnung und die
+bereits zentral gespeicherten Lifecycle-Transitionen bleiben in der Aktivitätsansicht
+sichtbar. Retry referenziert einen terminalen Vorgänger, erzeugt ausschließlich einen
+neuen Run und kann weder einen noch schreibenden Prozess umgehen noch überschreiben.
+
 ### Schritt 3 – Sichtbare und steuerbare Manager-Aktionen
 
 Ziel: Manager-Analysen, Planungen und bestätigte Aktionen erhalten dieselbe
 nachvollziehbare Bedienung wie AgentRuns – einschließlich sicherem Abbruch und
 eindeutigem Wiederholungsversuch.
 
-- [ ] Manager-Analysen, Planungen und Aktionen mit einem persistenten Laufstatus
+- [x] Manager-Analysen, Planungen und Aktionen mit einem persistenten Laufstatus
   versehen und mit Chat, Plan, Request und Audit-Events verknüpfen
-- [ ] Fortschritt laufender Manager-Aktionen sowie verständliche Fehlerdetails anzeigen
-- [ ] Manager-Aktionen sicher abbrechen und fehlgeschlagene Aktionen gezielt als neuen
+- [x] Fortschritt laufender Manager-Aktionen sowie verständliche Fehlerdetails anzeigen
+- [x] Manager-Aktionen sicher abbrechen und fehlgeschlagene Aktionen gezielt als neuen
   Versuch wiederholen können
-- [ ] bei Abbruch verhindern, dass ein teilweise ausgeführter Aktionsbatch unbemerkt
+- [x] bei Abbruch verhindern, dass ein teilweise ausgeführter Aktionsbatch unbemerkt
   zurückbleibt; bereits ausgeführte und noch ausstehende Teilaktionen müssen eindeutig
   getrennt dokumentiert sein
-- [ ] Bestätigungsgrenze, Eingabeparameter, erzeugte Plan-/Ticketreferenzen und
+- [x] Bestätigungsgrenze, Eingabeparameter, erzeugte Plan-/Ticketreferenzen und
   Ergebnis jedes Manager-Versuchs persistent verknüpfen
-- [ ] Wiederholung nie am bestehenden Versuch fortschreiben, sondern als neuen,
+- [x] Wiederholung nie am bestehenden Versuch fortschreiben, sondern als neuen,
   verknüpften Versuch mit unveränderter Auditspur anlegen
 
 Abnahme Schritt 3 und Prio 2:
@@ -182,6 +192,15 @@ Abnahme Schritt 3 und Prio 2:
   zurück.
 - Alle sichtbaren Run-, Request- und Managerzustände werden weiterhin per Polling
   konsistent aktualisiert.
+
+Schritt 3 und damit Prio 2 abgeschlossen am 15. August 2026. Manager-Analysen,
+Planungen und bestätigte Plan-Ausführungen erhalten jeweils einen persistenten
+Manager-Versuch. Dieser verknüpft Eingabe, Bestätigungsgrenze, Provider-Request,
+Analyse-Snapshot, Plan, Ergebnis, Fehler und Audit-Events. Ein Provider-Prompt kann
+gezielt abgebrochen werden. Der atomare Ticketbatch wird nie teilweise geschrieben;
+trifft ein Abbruch nach dessen Abschluss ein, dokumentiert der Versuch die schon
+ausgeführten und die nicht mehr gestarteten Teilaktionen getrennt. Retry erzeugt
+immer einen neuen, mit dem Vorgänger verknüpften Versuch.
 
 ## Priorität 3 – Freigabe-Gates und Agent-Adapter
 
@@ -248,8 +267,6 @@ Standardentwickler.
 
 ## Priorität 6 – Integration und Betrieb
 
-- [ ] lokalen MCP-Server auf Basis des vorhandenen Tool-Vertrags implementieren
-- [ ] MCP-Berechtigungen rollen- und projektbezogen validieren
 - [ ] optionalen Zugriffsschutz für Netzwerkbetrieb entwerfen
 - [ ] Live-Streaming nur bei echtem Betriebsbedarf ergänzen
 - [ ] Betriebs- und Restore-Dokumentation vervollständigen

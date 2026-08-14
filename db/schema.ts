@@ -260,6 +260,39 @@ export const managerPlans = sqliteTable("manager_plans", {
   appliedAt: text("applied_at"),
 }, (table) => [index("idx_manager_plans_project_updated").on(table.projectId, table.updatedAt)]);
 
+export const managerActions = sqliteTable("manager_actions", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id").notNull().references(() => projects.id),
+  conversationId: text("conversation_id").references(() => managerConversations.id),
+  planId: text("plan_id").references(() => managerPlans.id),
+  analysisSnapshotId: text("analysis_snapshot_id").references(() => projectAnalysisSnapshots.id),
+  agentRequestId: text("agent_request_id").references(() => agentRequests.id),
+  type: text("type").notNull(),
+  status: text("status").notNull().default("queued"),
+  phase: text("phase").notNull().default("queued"),
+  attemptNo: integer("attempt_no").notNull().default(1),
+  retryOfActionId: text("retry_of_action_id"),
+  confirmation: text("confirmation").notNull().default("not_required"),
+  inputJson: text("input_json").notNull().default("{}"),
+  resultJson: text("result_json").notNull().default("{}"),
+  error: text("error"),
+  cancellationRequestedAt: text("cancellation_requested_at"),
+  startedAt: text("started_at"),
+  finishedAt: text("finished_at"),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [
+  index("idx_manager_actions_project_created").on(table.projectId, table.createdAt),
+  index("idx_manager_actions_status").on(table.status, table.createdAt),
+]);
+
+export const managerActionEvents = sqliteTable("manager_action_events", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  actionId: text("action_id").notNull().references(() => managerActions.id),
+  eventType: text("event_type").notNull(),
+  payloadJson: text("payload_json").notNull().default("{}"),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [index("idx_manager_action_events_action_created").on(table.actionId, table.createdAt)]);
+
 export const managerPlanTasks = sqliteTable("manager_plan_tasks", {
   id: text("id").primaryKey(),
   planId: text("plan_id").notNull().references(() => managerPlans.id),

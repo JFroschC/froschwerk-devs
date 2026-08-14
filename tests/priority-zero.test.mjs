@@ -7,7 +7,6 @@ import test from "node:test";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const databaseModule = pathToFileURL(resolve(root, "db/local.ts")).href;
-const mcpModule = pathToFileURL(resolve(root, "db/mcp-tools.ts")).href;
 
 function databasePath() {
   return join(tmpdir(), `harness-priority-zero-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.sqlite`);
@@ -64,15 +63,4 @@ test("direct developer runner rejects a task without its active run id", () => {
   });
   assert.notEqual(result.status, 0);
   assert.match(`${result.stderr}\n${result.stdout}`, /--run-id ist bei einem direkten --task-Start erforderlich/);
-});
-
-test("MCP ticket schemas accept project-independent ticket prefixes", async () => {
-  const { mcpToolContract } = await import(mcpModule);
-  for (const tool of mcpToolContract.tools) {
-    const taskId = tool.inputSchema.properties.taskId;
-    if (!taskId) continue;
-    const pattern = new RegExp(taskId.pattern);
-    assert.match("FBT-477-A56D", pattern);
-    assert.doesNotMatch("invalid id", pattern);
-  }
 });

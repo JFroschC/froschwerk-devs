@@ -7,10 +7,13 @@ import {
   answerManagerQuestions,
   archiveProject,
   createProject,
+  createManagerAction,
   createTask,
   discardManagerPlan,
   findActiveManagerConversation,
+  finishManagerAction,
   finishAgentRun,
+  getAgentRunDetail,
   getAgentRun,
   getLatestManagerPlan,
   getLatestProjectAnalysisSnapshot,
@@ -22,30 +25,36 @@ import {
   listAgents,
   listChatMessages,
   listManagerConversationEntries,
+  listManagerActions,
   listProjects,
+  listProjectTaskEvents,
   listTasks,
   removeManagerPlanTask,
   resolveManagerConversation,
+  requestManagerActionCancellation,
+  startManagerAction,
   updateAgent,
   updateManagerPlanTask,
+  updateManagerAction,
   updateProject,
   updateTask,
 } from "../db/local.ts";
-import { runManagerPrompt } from "./manager-runner.mjs";
+import { cancelManagerPrompt, runManagerPrompt } from "./manager-runner.mjs";
 import {
   analysisSnapshotHasPlanningDocument,
-  executeConfirmedManagerPlan,
+  executeManagedManagerPlan,
   ensureOrderedExistingTasks,
   managerDecisionHasMutation,
   managerRequestWantsOrdering,
   managerRequestWantsPlan,
   parseManagerDecision,
   registerManagerDecision,
-  runReadOnlyProjectAnalysis,
+  runManagedProjectAnalysis,
 } from "./manager-actions.mjs";
 import { advanceAutoProcess, cancelActiveRun, claimAndLaunchDeveloper, finishTesterAndContinue, resumeAutoProcesses, startLifecycleSupervisor, startTesterForTask } from "./workflow-orchestrator.mjs";
 import { getProviderStatus } from "./providers.mjs";
 import { checkRuntime } from "./runtime-check.mjs";
+import { performRunStopAction, performTaskRunAction } from "./run-actions.mjs";
 
 const port = Number(process.env.HARNESS_API_PORT ?? 3001);
 
@@ -88,33 +97,46 @@ async function managerReply(payload) {
   } catch (error) {
     return { error: error instanceof Error ? error.message : "Manager-Gespräch konnte nicht fortgesetzt werden", status: 400 };
   }
+  const action = createManagerAction({ projectId, conversationId: conversation.id, type: "planning", input: { body, answers: answers ?? {} } });
+  startManagerAction(action.id, "preparing_context");
   const tasks = listTasks(projectId);
   const history = listChatMessages(20, projectId).map((message) => `${message.sender}: ${message.text}`).join("\n");
   const wantsPlan = managerRequestWantsPlan(body);
   let analysis = getLatestProjectAnalysisSnapshot(projectId);
-  if (wantsPlan || !analysisSnapshotHasPlanningDocument(analysis)) analysis = await runReadOnlyProjectAnalysis(projectId);
+  if (wantsPlan || !analysisSnapshotHasPlanningDocument(analysis)) {
+    try {
+      const managed = await runManagedProjectAnalysis(projectId, { source: "manager_planning" });
+      analysis = managed.snapshot;
+      updateManagerAction(action.id, { phase: "provider_prompt", analysisSnapshotId: analysis.id });
+    } catch (error) {
+      finishManagerAction(action.id, { status: String(error instanceof Error ? error.message : error) === "MANAGER_ACTION_CANCELLED" ? "cancelled" : "failed", phase: "analysis_failed", error: error instanceof Error ? error.message : String(error) });
+      return { error: error instanceof Error ? error.message : "Projektanalyse fehlgeschlagen", status: 422 };
+    }
+  }
   let parsed;
   try {
     parsed = parseManagerDecision(await runManagerPrompt(
       `Aktives Projekt:\n${JSON.stringify(project, null, 2)}\n\nAktueller Board-Kontext:\n${JSON.stringify(tasks, null, 2)}\n\nLetzter Chatverlauf dieses Projekts:\n${history || "Noch kein Verlauf."}\n\nPersistenter Gesprächszustand:\n${JSON.stringify({ conversation: getManagerConversation(conversation.id), entries: listManagerConversationEntries(conversation.id, 30), latestAnalysis: getLatestProjectAnalysisSnapshot(projectId) }, null, 2)}\n\nNutzerfrage oder Antwort:\n${body || "Die offenen Rückfragen wurden beantwortet. Setze die Planung fort."}`,
       project.workspacePath || process.cwd(),
-      { projectId },
+      { projectId, actionId: action.id, onRequestStarted: (agentRequestId) => updateManagerAction(action.id, { phase: "provider_prompt", agentRequestId }) },
     ));
     parsed.decision = ensureOrderedExistingTasks(parsed.decision, tasks, managerRequestWantsOrdering(body));
     if (wantsPlan && !managerDecisionHasMutation(parsed.decision)) {
       parsed = parseManagerDecision(await runManagerPrompt(
         `Die lokale Analyse wurde soeben ausgeführt. Der Nutzer verlangt ausdrücklich Analyse UND Ticketanlage. Erzeuge jetzt die konkrete Freigabevorschau mit create_tasks oder update_tasks. Gib keine weitere analyze_project-Aktion zurück, solange der bereitgestellte Planinhalt lesbar ist.\n\nProjektanalyse:\n${JSON.stringify(analysis, null, 2)}\n\nBoard:\n${JSON.stringify(tasks, null, 2)}\n\nNutzeranforderung:\n${body}`,
         project.workspacePath || process.cwd(),
-        { projectId },
+        { projectId, actionId: action.id, onRequestStarted: (agentRequestId) => updateManagerAction(action.id, { phase: "provider_retry", agentRequestId }) },
       ));
     }
   } catch (error) {
+    finishManagerAction(action.id, { status: String(error instanceof Error ? error.message : error) === "MANAGER_ACTION_CANCELLED" ? "cancelled" : "failed", phase: "provider_failed", error: error instanceof Error ? error.message : String(error) });
     return { error: error instanceof Error ? error.message : "Mira konnte nicht über den lokalen Provider antworten", status: 503 };
   }
   let result;
   try {
     result = await registerManagerDecision({ projectId, conversationId: conversation.id, decision: parsed.decision, validationErrors: parsed.errors });
   } catch (error) {
+    finishManagerAction(action.id, { status: "failed", phase: "persisting_failed", error: error instanceof Error ? error.message : String(error) });
     return { error: error instanceof Error ? error.message : "Miras Vorschlag konnte nicht gespeichert werden", status: 422 };
   }
   const notices = [
@@ -123,6 +145,7 @@ async function managerReply(payload) {
     result.plan ? `Ich habe einen bestätigungspflichtigen Entwurf mit ${result.plan.tasks.length} Ticket${result.plan.tasks.length === 1 ? "" : "s"} vorbereitet.` : "",
   ].filter(Boolean);
   const reply = [parsed.decision.reply || "Ich habe deine Nachricht aufgenommen.", ...notices].join("\n\n");
+  const completedAction = finishManagerAction(action.id, { status: "succeeded", phase: "decision_saved", result: { planId: result.plan?.id ?? null, analysisSnapshotId: result.analysisSnapshot?.id ?? analysis?.id ?? null, validationErrors: parsed.errors }, planId: result.plan?.id, analysisSnapshotId: result.analysisSnapshot?.id ?? analysis?.id });
   return {
     status: 201,
     body: {
@@ -133,6 +156,7 @@ async function managerReply(payload) {
       conversation: getManagerConversation(conversation.id),
       plan: result.plan,
       analysisSnapshot: result.analysisSnapshot,
+      action: completedAction,
     },
   };
 }
@@ -160,10 +184,20 @@ const server = createServer(async (request, response) => {
     if (projectMatch && request.method === "DELETE") return json(response, 200, { project: archiveProject(decodeURIComponent(projectMatch[1])) });
 
     if (request.method === "GET" && pathname === "/api/agent-runs") return json(response, 200, { runs: listAgentRuns(url.searchParams.get("taskId") ?? undefined, url.searchParams.get("projectId") ?? undefined) });
+    const agentRunMatch = pathname.match(/^\/api\/agent-runs\/([^/]+)$/);
+    if (request.method === "GET" && agentRunMatch) {
+      const run = getAgentRunDetail(decodeURIComponent(agentRunMatch[1]));
+      return run ? json(response, 200, { run }) : json(response, 404, { error: "agent run not found" });
+    }
     if (request.method === "GET" && pathname === "/api/agents") return json(response, 200, { agents: listAgents() });
     if (request.method === "GET" && pathname === "/api/agent-requests") {
       const projectId = url.searchParams.get("projectId") ?? undefined;
       return json(response, 200, { requests: listAgentRequests(projectId, Number(url.searchParams.get("limit") ?? 25)), summary: agentRequestSummary(projectId) });
+    }
+    if (request.method === "GET" && pathname === "/api/task-events") {
+      const projectId = url.searchParams.get("projectId");
+      if (!projectId) return json(response, 400, { error: "projectId is required" });
+      return json(response, 200, { events: listProjectTaskEvents(projectId, Number(url.searchParams.get("limit") ?? 100)) });
     }
     const agentMatch = pathname.match(/^\/api\/agents\/([^/]+)$/);
     if (request.method === "PATCH" && agentMatch) {
@@ -177,6 +211,19 @@ const server = createServer(async (request, response) => {
       const title = typeof payload.title === "string" ? payload.title.trim() : "";
       if (!title) return json(response, 400, { error: "title is required" });
       return json(response, 201, { task: createTask({ ...payload, title }) });
+    }
+    const taskRunActionMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/run-action$/);
+    if (request.method === "POST" && taskRunActionMatch) {
+      const payload = await readJson(request);
+      const result = performTaskRunAction({
+        taskId: decodeURIComponent(taskRunActionMatch[1]),
+        projectId: typeof payload.projectId === "string" ? payload.projectId : undefined,
+        action: payload.action,
+        role: payload.role,
+        confirmation: payload.confirmation,
+        sourceRunId: typeof payload.sourceRunId === "string" ? payload.sourceRunId : undefined,
+      });
+      return json(response, result.ok ? 200 : 409, result);
     }
 
     if (request.method === "POST" && pathname === "/api/workflow/next") {
@@ -202,6 +249,13 @@ const server = createServer(async (request, response) => {
     if (request.method === "POST" && cancelMatch) {
       const result = cancelActiveRun(decodeURIComponent(cancelMatch[1]));
       return result.cancelled ? json(response, 200, result) : json(response, 409, result);
+    }
+    const runActionMatch = pathname.match(/^\/api\/agent-runs\/([^/]+)\/action$/);
+    if (request.method === "POST" && runActionMatch) {
+      const payload = await readJson(request);
+      if (payload.action !== "stop") return json(response, 400, { ok: false, reason: "unknown_action" });
+      const result = performRunStopAction({ runId: decodeURIComponent(runActionMatch[1]), confirmation: payload.confirmation });
+      return json(response, result.ok ? 200 : 409, result);
     }
     const finishMatch = pathname.match(/^\/api\/agent-runs\/([^/]+)\/finish$/);
     if (request.method === "POST" && finishMatch) {
@@ -250,24 +304,32 @@ const server = createServer(async (request, response) => {
       return json(response, result.status, result.error ? { error: result.error } : result.body);
     }
 
+    const managerActionCancelMatch = pathname.match(/^\/api\/manager\/actions\/([^/]+)\/cancel$/);
+    if (request.method === "POST" && managerActionCancelMatch) {
+      const result = requestManagerActionCancellation(decodeURIComponent(managerActionCancelMatch[1]));
+      if (!result.action) return json(response, 404, { error: "Manager-Versuch nicht gefunden", reason: result.reason });
+      if (result.reason) return json(response, 409, { action: result.action, error: "Manager-Versuch ist nicht mehr aktiv", reason: result.reason });
+      return json(response, 200, { action: result.action, providerStopped: cancelManagerPrompt(result.action.id) });
+    }
+
     if (request.method === "GET" && pathname === "/api/manager/state") {
       const projectId = url.searchParams.get("projectId") ?? "project-agent-harness";
       if (!getProject(projectId)) return json(response, 404, { error: "Projekt nicht gefunden" });
-      return json(response, 200, { conversation: findActiveManagerConversation(projectId), plan: getLatestManagerPlan(projectId), analysisSnapshot: getLatestProjectAnalysisSnapshot(projectId) });
+      return json(response, 200, { conversation: findActiveManagerConversation(projectId), plan: getLatestManagerPlan(projectId), analysisSnapshot: getLatestProjectAnalysisSnapshot(projectId), actions: listManagerActions(projectId) });
     }
     if (request.method === "POST" && pathname === "/api/manager/analyze") {
       const payload = await readJson(request);
       const projectId = typeof payload.projectId === "string" ? payload.projectId : "project-agent-harness";
-      const snapshot = await runReadOnlyProjectAnalysis(projectId);
-      return json(response, 201, { analysisSnapshot: snapshot, message: addChatMessage({ senderType: "manager", projectId, body: `Projektanalyse gespeichert: ${snapshot.summary}` }) });
+      const { snapshot, action } = await runManagedProjectAnalysis(projectId, { source: "manual" });
+      return json(response, 201, { analysisSnapshot: snapshot, action, message: addChatMessage({ senderType: "manager", projectId, body: `Projektanalyse gespeichert: ${snapshot.summary}` }) });
     }
     const confirmMatch = pathname.match(/^\/api\/manager\/plans\/([^/]+)\/confirm$/);
     if (request.method === "POST" && confirmMatch) {
       const plan = getManagerPlan(decodeURIComponent(confirmMatch[1]));
       if (!plan) return json(response, 404, { error: "Plan nicht gefunden" });
-      const result = executeConfirmedManagerPlan(plan.id);
+      const result = executeManagedManagerPlan(plan.id, { plan });
       if (!result) return json(response, 404, { error: "Plan nicht gefunden" });
-      return json(response, 200, { plan: result.plan, tasks: listTasks(plan.projectId), message: addChatMessage({ senderType: "manager", projectId: plan.projectId, body: result.confirmation }) });
+      return json(response, 200, { plan: result.plan, tasks: listTasks(plan.projectId), action: result.action, message: addChatMessage({ senderType: "manager", projectId: plan.projectId, body: result.confirmation }) });
     }
     const discardMatch = pathname.match(/^\/api\/manager\/plans\/([^/]+)\/discard$/);
     if (request.method === "POST" && discardMatch) {

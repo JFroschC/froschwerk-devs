@@ -70,4 +70,23 @@ test("the local API serves workflow state and auto-mode control", async (context
   });
   assert.equal(compatibilityCancel.status, 409);
   assert.equal((await compatibilityCancel.json()).reason, "run_not_active");
+
+  const declinedStart = await fetch(`${base}/api/tasks/FW-115/run-action`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ projectId: "project-agent-harness", action: "start", role: "developer", confirmation: "declined" }),
+  });
+  assert.equal(declinedStart.status, 200);
+  assert.equal((await declinedStart.json()).declined, true);
+
+  const staleRetry = await fetch(`${base}/api/tasks/FW-115/run-action`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ projectId: "project-agent-harness", action: "retry", role: "developer", confirmation: "confirmed", sourceRunId: "missing-run" }),
+  });
+  assert.equal(staleRetry.status, 409);
+  assert.equal((await staleRetry.json()).reason, "retry_source_not_terminal");
+  const activity = await fetch(`${base}/api/task-events?projectId=project-agent-harness`).then((response) => response.json());
+  assert.ok(activity.events.some((event) => event.eventType === "agent.action_declined"));
+  assert.ok(activity.events.some((event) => event.eventType === "agent.action_rejected"));
 });

@@ -30,6 +30,31 @@ test("the central lifecycle contract permits only defined transitions", () => {
   `), "ok");
 });
 
+test("existing agent_runs tables receive process identity during lifecycle migration", () => {
+  assert.equal(run(`
+    import assert from "node:assert/strict";
+    import { DatabaseSync } from "node:sqlite";
+    const legacy = new DatabaseSync(process.env.HARNESS_DB_PATH);
+    legacy.exec(\`
+      CREATE TABLE agent_runs (
+        id TEXT PRIMARY KEY, task_id TEXT NOT NULL, agent_id TEXT NOT NULL, role TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'queued', attempt_no INTEGER NOT NULL DEFAULT 1,
+        input_json TEXT NOT NULL DEFAULT '{}', output_json TEXT NOT NULL DEFAULT '{}',
+        summary TEXT NOT NULL DEFAULT '', error TEXT, process_id INTEGER,
+        started_at TEXT, finished_at TEXT, created_at TEXT NOT NULL
+      );
+    \`);
+    legacy.close();
+    const db = await import(${JSON.stringify(databaseModule)});
+    db.listAgentRuns();
+    const migrated = new DatabaseSync(process.env.HARNESS_DB_PATH);
+    const columns = migrated.prepare("PRAGMA table_info(agent_runs)").all().map((column) => column.name);
+    migrated.close();
+    assert.ok(columns.includes("process_identity"));
+    console.log("ok");
+  `), "ok");
+});
+
 test("runs persist heartbeat, activity, technical completion and derived agent status", () => {
   assert.equal(run(`
     import assert from "node:assert/strict";
@@ -94,6 +119,26 @@ test("manager requests expose persistent activity and phase", () => {
     assert.equal(active.currentPhase, "provider_output");
     assert.ok(active.lastActivityAt);
     db.finishAgentRequest(request.requestId, { status: "succeeded", response: "ok", startedAt: request.startedAt });
+    console.log("ok");
+  `), "ok");
+});
+
+test("run details expose the persisted audit trail without deriving lifecycle state in the UI", () => {
+  assert.equal(run(`
+    import assert from "node:assert/strict";
+    const db = await import(${JSON.stringify(databaseModule)});
+    const claimed = db.claimNextTask("agent-developer-1", "FW-115", "project-agent-harness");
+    db.markAgentRunRunning(claimed.runId);
+    const request = db.startAgentRequest({ projectId: "project-agent-harness", taskId: "FW-115", runId: claimed.runId, agentId: "agent-developer-1", role: "developer", provider: "codex", model: "gpt-5", prompt: "Implementiere die Änderung" });
+    db.reportAgentRequestActivity(request.requestId, "implementation");
+    db.finishAgentRequest(request.requestId, { status: "succeeded", response: "Änderung fertig", startedAt: request.startedAt });
+    const detail = db.getAgentRunDetail(claimed.runId);
+    assert.equal(detail.status, "running");
+    assert.ok(detail.lease?.expiresAt);
+    assert.equal(detail.requests.length, 1);
+    assert.equal(detail.requests[0].responsePreview, "Änderung fertig");
+    assert.ok(detail.events.some((event) => event.eventType === "task.claimed"));
+    assert.ok(db.listProjectTaskEvents("project-agent-harness").some((event) => event.taskId === "FW-115"));
     console.log("ok");
   `), "ok");
 });

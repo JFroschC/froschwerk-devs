@@ -2,6 +2,8 @@ import {
   addChatMessage,
   addManagerConversationEntry,
   answerManagerQuestions,
+  createManagerAction,
+  finishManagerAction,
   getLatestProjectAnalysisSnapshot,
   getManagerConversation,
   getProject,
@@ -9,6 +11,8 @@ import {
   listManagerConversationEntries,
   listTasks,
   resolveManagerConversation,
+  startManagerAction,
+  updateManagerAction,
 } from "../../../../db/local.ts";
 import { runManagerPrompt } from "../../../../scripts/manager-runner.mjs";
 import {
@@ -19,7 +23,7 @@ import {
   managerRequestWantsPlan,
   parseManagerDecision,
   registerManagerDecision,
-  runReadOnlyProjectAnalysis,
+  runManagedProjectAnalysis,
 } from "../../../../scripts/manager-actions.mjs";
 
 export const runtime = "nodejs";
@@ -42,29 +46,42 @@ export async function POST(request: Request) {
     return Response.json({ error: error instanceof Error ? error.message : "Manager-Gespräch konnte nicht fortgesetzt werden" }, { status: 400 });
   }
 
+  const action = createManagerAction({ projectId, conversationId: conversation.id, type: "planning", input: { body, answers: answers ?? {} } });
+  startManagerAction(action.id, "preparing_context");
+
   const tasks = listTasks(projectId);
   const history = listChatMessages(20, projectId).map((message) => `${message.sender}: ${message.text}`).join("\n");
   const currentConversation = getManagerConversation(conversation.id);
   const wantsPlan = managerRequestWantsPlan(body);
   let analysis = getLatestProjectAnalysisSnapshot(projectId);
-  if (wantsPlan || !analysisSnapshotHasPlanningDocument(analysis)) analysis = await runReadOnlyProjectAnalysis(projectId);
+  if (wantsPlan || !analysisSnapshotHasPlanningDocument(analysis)) {
+    try {
+      const managed = await runManagedProjectAnalysis(projectId, { source: "manager_planning" });
+      analysis = managed.snapshot;
+      updateManagerAction(action.id, { phase: "provider_prompt", analysisSnapshotId: analysis.id });
+    } catch (error) {
+      finishManagerAction(action.id, { status: String(error instanceof Error ? error.message : error) === "MANAGER_ACTION_CANCELLED" ? "cancelled" : "failed", phase: "analysis_failed", error: error instanceof Error ? error.message : String(error) });
+      return Response.json({ error: error instanceof Error ? error.message : "Projektanalyse fehlgeschlagen", actionId: action.id }, { status: 422 });
+    }
+  }
   const entries = listManagerConversationEntries(conversation.id, 30);
   let parsed;
   try {
     parsed = parseManagerDecision(await runManagerPrompt(
       `Aktives Projekt:\n${JSON.stringify(project, null, 2)}\n\nAktueller Board-Kontext dieses Projekts:\n${JSON.stringify(tasks, null, 2)}\n\nLetzter Chatverlauf dieses Projekts (maximal 20 Nachrichten):\n${history || "Noch kein Verlauf."}\n\nPersistenter Gesprächszustand:\n${JSON.stringify({ conversation: currentConversation, entries, latestAnalysis: analysis }, null, 2)}\n\nNutzerfrage oder Antwort:\n${body || "Die offenen Rückfragen wurden beantwortet. Setze die Planung fort."}`,
       project.workspacePath || process.cwd(),
-      { projectId },
+      { projectId, actionId: action.id, onRequestStarted: (agentRequestId: string) => updateManagerAction(action.id, { phase: "provider_prompt", agentRequestId }) },
     ));
     parsed.decision = ensureOrderedExistingTasks(parsed.decision, tasks, managerRequestWantsOrdering(body));
     if (wantsPlan && !managerDecisionHasMutation(parsed.decision)) {
       parsed = parseManagerDecision(await runManagerPrompt(
         `Die lokale Analyse wurde soeben ausgeführt. Der Nutzer verlangt ausdrücklich Analyse UND Ticketanlage. Erzeuge jetzt die konkrete Freigabevorschau mit create_tasks oder update_tasks. Gib keine weitere analyze_project-Aktion zurück, solange der bereitgestellte Planinhalt lesbar ist.\n\nProjektanalyse:\n${JSON.stringify(analysis, null, 2)}\n\nBoard:\n${JSON.stringify(tasks, null, 2)}\n\nNutzeranforderung:\n${body}`,
         project.workspacePath || process.cwd(),
-        { projectId },
+        { projectId, actionId: action.id, onRequestStarted: (agentRequestId: string) => updateManagerAction(action.id, { phase: "provider_retry", agentRequestId }) },
       ));
     }
   } catch (error) {
+    finishManagerAction(action.id, { status: String(error instanceof Error ? error.message : error) === "MANAGER_ACTION_CANCELLED" ? "cancelled" : "failed", phase: "provider_failed", error: error instanceof Error ? error.message : String(error) });
     return Response.json({ error: error instanceof Error ? error.message : "Mira konnte nicht über den lokalen Provider antworten" }, { status: 503 });
   }
 
@@ -72,6 +89,7 @@ export async function POST(request: Request) {
   try {
     result = await registerManagerDecision({ projectId, conversationId: conversation.id, decision: parsed.decision, validationErrors: parsed.errors });
   } catch (error) {
+    finishManagerAction(action.id, { status: "failed", phase: "persisting_failed", error: error instanceof Error ? error.message : String(error) });
     return Response.json({ error: error instanceof Error ? error.message : "Miras Vorschlag konnte nicht gespeichert werden" }, { status: 422 });
   }
   const notices = [
@@ -80,6 +98,7 @@ export async function POST(request: Request) {
     result.plan ? `Ich habe einen bestätigungspflichtigen Entwurf mit ${result.plan.tasks.length} Ticket${result.plan.tasks.length === 1 ? "" : "s"} vorbereitet.` : "",
   ].filter(Boolean);
   const reply = [parsed.decision.reply || "Ich habe deine Nachricht aufgenommen.", ...notices].join("\n\n");
+  const completedAction = finishManagerAction(action.id, { status: "succeeded", phase: "decision_saved", result: { planId: result.plan?.id ?? null, analysisSnapshotId: result.analysisSnapshot?.id ?? analysis?.id ?? null, validationErrors: parsed.errors }, planId: result.plan?.id, analysisSnapshotId: result.analysisSnapshot?.id ?? analysis?.id });
   return Response.json({
     message: addChatMessage({ senderType: "manager", body: reply, projectId }),
     tasks: listTasks(projectId),
@@ -88,5 +107,6 @@ export async function POST(request: Request) {
     conversation: getManagerConversation(conversation.id),
     plan: result.plan,
     analysisSnapshot: result.analysisSnapshot,
+    action: completedAction,
   }, { status: 201 });
 }

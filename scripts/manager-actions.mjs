@@ -3,13 +3,20 @@ import {
   agentRequestSummary,
   applyManagerPlan,
   createManagerPlan,
+  createManagerAction,
   createProjectAnalysisSnapshot,
+  finishManagerAction,
+  getManagerAction,
   getLatestProjectAnalysisSnapshot,
+  getManagerPlan,
   getProject,
   listAgentRequests,
   listTasks,
+  isManagerActionCancellationRequested,
   saveManagerQuestions,
   updateManagerConversation,
+  updateManagerAction,
+  startManagerAction,
 } from "../db/local.ts";
 import { analyzeProjectWorkspace } from "./project-analysis.mjs";
 import { claimAndLaunchDeveloper, startTesterForTask } from "./workflow-orchestrator.mjs";
@@ -323,6 +330,23 @@ export async function runReadOnlyProjectAnalysis(projectId) {
   return createProjectAnalysisSnapshot(projectId, result);
 }
 
+export async function runManagedProjectAnalysis(projectId, options = {}) {
+  const action = createManagerAction({ projectId, type: "analysis", input: { source: options.source ?? "manual" }, retryOfActionId: options.retryOfActionId });
+  startManagerAction(action.id, "collecting_workspace");
+  try {
+    const snapshot = await runReadOnlyProjectAnalysis(projectId);
+    if (isManagerActionCancellationRequested(action.id)) {
+      finishManagerAction(action.id, { status: "cancelled", phase: "cancelled", result: { analysisSnapshotId: snapshot.id, note: "Snapshot wurde nicht als abgeschlossene Manager-Aktion übernommen." }, analysisSnapshotId: snapshot.id });
+      throw new Error("MANAGER_ACTION_CANCELLED");
+    }
+    finishManagerAction(action.id, { status: "succeeded", phase: "snapshot_saved", result: { analysisSnapshotId: snapshot.id, summary: snapshot.summary }, analysisSnapshotId: snapshot.id });
+    return { action: action.id, snapshot };
+  } catch (error) {
+    if (String(error?.message ?? error) !== "MANAGER_ACTION_CANCELLED") finishManagerAction(action.id, { status: "failed", phase: "failed", error: error instanceof Error ? error.message : String(error) });
+    throw error;
+  }
+}
+
 export async function registerManagerDecision(input) {
   const { projectId, conversationId, decision, validationErrors = [] } = input;
   const project = getProject(projectId);
@@ -377,6 +401,45 @@ export function executeConfirmedManagerPlan(planId) {
     ...confirmations,
   ].join(" ");
   return { ...applied, confirmation: summary };
+}
+
+export function executeManagedManagerPlan(planId, options = {}) {
+  // applyManagerPlan is a single SQLite transaction. Cancellation is inspected
+  // before it starts and before every subsequent process-launch subaction.
+  const plan = options.plan ?? getManagerPlan(planId);
+  const projectId = plan?.projectId;
+  if (!projectId) throw new Error("Der Manager-Plan muss vor der Ausführung geladen werden");
+  const action = createManagerAction({ projectId, planId, type: "execute_plan", confirmation: "confirmed", input: { planId }, retryOfActionId: options.retryOfActionId });
+  startManagerAction(action.id, "applying_ticket_batch");
+  try {
+    if (isManagerActionCancellationRequested(action.id)) throw new Error("MANAGER_ACTION_CANCELLED");
+    const applied = applyManagerPlan(planId);
+    if (!applied) throw new Error("Plan nicht gefunden");
+    updateManagerAction(action.id, { phase: "ticket_batch_applied", result: { createdTaskIds: applied.tasks.map((task) => task.id), planId } });
+    const confirmations = [];
+    const completedSubactions = [];
+    for (const item of applied.actions) {
+      if (!["start_next", "start_task", "start_tester"].includes(item.type)) continue;
+      if (isManagerActionCancellationRequested(action.id)) {
+        finishManagerAction(action.id, { status: "cancelled", phase: "cancelled_after_atomic_batch", result: { planId, createdTaskIds: applied.tasks.map((task) => task.id), completedSubactions, pendingSubactions: applied.actions.filter((candidate) => ["start_next", "start_task", "start_tester"].includes(candidate.type)).slice(completedSubactions.length) } });
+        return { ...applied, confirmation: "Der Ticketbatch wurde atomar angelegt. Noch ausstehende Startaktionen wurden nach dem Abbruch nicht ausgeführt.", action: getManagerAction(action.id) };
+      }
+      const result = item.type === "start_tester"
+        ? startTesterForTask(item.taskId, item.agentId, applied.plan.projectId)
+        : claimAndLaunchDeveloper(item.agentId, item.type === "start_task" ? item.taskId : undefined, applied.plan.projectId);
+      completedSubactions.push({ type: item.type, taskId: item.taskId ?? result.task?.id ?? null, runId: result.runId ?? null, started: Boolean(result.runId) });
+      confirmations.push(result.runId ? `${item.taskId ?? result.task?.id} wurde gestartet.` : `${item.taskId ?? "Nächstes Ticket"} konnte nicht gestartet werden.`);
+    }
+    const updatedTaskCount = applied.actions.reduce((count, item) => count + (item.type === "update_tasks" && Array.isArray(item.updates) ? item.updates.length : 0), 0);
+    const confirmation = [applied.tasks.length ? `${applied.tasks.length} Ticket${applied.tasks.length === 1 ? "" : "s"} wurde${applied.tasks.length === 1 ? "" : "n"} aus dem bestätigten Plan angelegt.` : updatedTaskCount ? `${updatedTaskCount} bestehende Ticket${updatedTaskCount === 1 ? "" : "s"} wurde${updatedTaskCount === 1 ? "" : "n"} angepasst.` : "Der bestätigte Plan wurde angewendet.", ...confirmations].join(" ");
+    finishManagerAction(action.id, { status: "succeeded", phase: "finished", result: { planId, createdTaskIds: applied.tasks.map((task) => task.id), completedSubactions }, planId });
+    return { ...applied, confirmation, action: getManagerAction(action.id) };
+  } catch (error) {
+    const cancelled = String(error?.message ?? error) === "MANAGER_ACTION_CANCELLED";
+    finishManagerAction(action.id, { status: cancelled ? "cancelled" : "failed", phase: cancelled ? "cancelled_before_batch" : "failed", error: cancelled ? undefined : error instanceof Error ? error.message : String(error), result: { planId } });
+    if (cancelled) return { plan: options.plan, tasks: [], actions: [], confirmation: "Manager-Aktion wurde vor dem Ticketbatch abgebrochen.", action: getManagerAction(action.id) };
+    throw error;
+  }
 }
 
 // Kept as a compatibility export for callers from the MVP. New callers must

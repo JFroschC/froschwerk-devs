@@ -38,6 +38,30 @@ test("manager schema v2 rejects unsafe actions and accepts a dependency plan", (
   assert.equal(output, "ok");
 });
 
+test("manager actions persist lifecycle, cancellation and a separately linked retry", () => {
+  const output = run(`
+    import assert from "node:assert/strict";
+    const db = await import(${JSON.stringify(databaseModule)});
+    const first = db.createManagerAction({ projectId: "project-agent-harness", type: "analysis", input: { source: "test" } });
+    assert.equal(first.status, "queued");
+    db.startManagerAction(first.id, "collecting_workspace");
+    db.updateManagerAction(first.id, { phase: "workspace_ready", result: { files: 3 } });
+    const cancellation = db.requestManagerActionCancellation(first.id);
+    assert.equal(cancellation.action.phase, "cancelling");
+    db.finishManagerAction(first.id, { status: "succeeded", result: { ignored: true } });
+    const cancelled = db.getManagerAction(first.id);
+    assert.equal(cancelled.status, "cancelled");
+    assert.equal(cancelled.result.ignored, true);
+    assert.ok(cancelled.events.some((event) => event.eventType === "manager.action_cancellation_requested"));
+    const retry = db.createManagerAction({ projectId: "project-agent-harness", type: "analysis", retryOfActionId: first.id, input: { source: "retry" } });
+    assert.equal(retry.attemptNo, 2);
+    assert.equal(retry.retryOfActionId, first.id);
+    assert.equal(db.listManagerActions("project-agent-harness")[0].id, retry.id);
+    console.log("ok");
+  `);
+  assert.equal(output, "ok");
+});
+
 test("legacy SQLite databases receive manager columns before their indexes", () => {
   const output = run(`
     import assert from "node:assert/strict";
@@ -136,14 +160,14 @@ test("a confirmed manager plan can revise an existing ticket", () => {
     const db = await import(${JSON.stringify(databaseModule)});
     const plan = db.createManagerPlan({ projectId: "project-agent-harness", summary: "Bestehendes Ticket präzisieren", actions: [{
       type: "update_tasks",
-      updates: [{ taskId: "FW-115", title: "MCP-Server anbinden", priority: "High", acceptance: ["MCP-Server ist lokal erreichbar"] }],
+      updates: [{ taskId: "FW-115", title: "Run-Aktionssteuerung anbinden", priority: "High", acceptance: ["Run-Aktionen sind lokal erreichbar"] }],
     }] });
     const applied = db.applyManagerPlan(plan.id);
     const task = db.listTasks("project-agent-harness").find((entry) => entry.id === "FW-115");
     assert.equal(applied.tasks.length, 0);
-    assert.equal(task.title, "MCP-Server anbinden");
+    assert.equal(task.title, "Run-Aktionssteuerung anbinden");
     assert.equal(task.priority, "High");
-    assert.deepEqual(task.acceptance, ["MCP-Server ist lokal erreichbar"]);
+    assert.deepEqual(task.acceptance, ["Run-Aktionen sind lokal erreichbar"]);
     console.log("ok");
   `);
   assert.equal(output, "ok");
@@ -155,13 +179,13 @@ test("a single manager plan can create and update tickets together", () => {
     const db = await import(${JSON.stringify(databaseModule)});
     const plan = db.createManagerPlan({ projectId: "project-agent-harness", summary: "Neue und bestehende Tickets", actions: [
       { type: "create_tasks", tasks: [{ clientId: "new-feature", sequence: 10, title: "Neue Funktion", priority: "Medium", acceptance: ["Funktion ist testbar"] }] },
-      { type: "update_tasks", updates: [{ taskId: "FW-115", sequence: 5, title: "MCP-Server verbindlich anbinden", acceptance: ["MCP-Server ist lokal erreichbar"] }] },
+      { type: "update_tasks", updates: [{ taskId: "FW-115", sequence: 5, title: "Run-Aktionssteuerung verbindlich anbinden", acceptance: ["Run-Aktionen sind lokal erreichbar"] }] },
     ] });
     const applied = db.applyManagerPlan(plan.id);
     const tasks = db.listTasks("project-agent-harness");
     assert.equal(applied.plan.status, "applied");
     assert.ok(tasks.some((task) => task.title === "Neue Funktion"));
-    assert.equal(tasks.find((task) => task.id === "FW-115").title, "MCP-Server verbindlich anbinden");
+    assert.equal(tasks.find((task) => task.id === "FW-115").title, "Run-Aktionssteuerung verbindlich anbinden");
     assert.equal(tasks.find((task) => task.id === "FW-115").planSequence, 5);
     assert.equal(tasks.find((task) => task.id === "FW-115").planId, plan.id);
     console.log("ok");

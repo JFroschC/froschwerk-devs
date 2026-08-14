@@ -1,6 +1,6 @@
 # SQLite und Datenmodell
 
-Stand: 14. August 2026
+Stand: 15. August 2026
 
 ## Autoritative Laufzeit
 
@@ -38,7 +38,7 @@ Ableitung aus aktiven Runs ist Teil des nächsten Lifecycle-Meilensteins.
 - `task_acceptance_criteria`: sortierte Akzeptanzkriterien
 - `task_dependencies`: harte Ticketabhängigkeiten
 - `comments`: Benutzer-, Manager-, Entwickler- und Testerkommentare
-- `task_events`: nachvollziehbare Workflow- und MCP-Ereignisse
+- `task_events`: nachvollziehbare Workflow-, Run- und Benutzeraktionsereignisse
 
 ### Runs, Requests und Ergebnisse
 
@@ -61,6 +61,9 @@ Die Artefakttabelle besitzt noch keinen produktiven Schreib-/Lese-Service.
 - `project_analysis_snapshots`: begrenzte Read-only-Projektanalysen
 - `manager_plans`: Planvorschau, Status, Annahmen, Risiken und Aktionen
 - `manager_plan_tasks`: Ticketentwürfe, Reihenfolge, Parent- und Abhängigkeitsangaben
+- `manager_actions`: unveränderliche Manager-Versuche mit Status, Phase, Eingabe,
+  Bestätigung, Retry-Verweis, Provider-Request sowie Ergebnis-/Fehlerreferenzen
+- `manager_action_events`: chronologische Auditspur jedes Manager-Versuchs
 
 ## Claims und Parallelität
 
@@ -157,6 +160,8 @@ AgentRuns verwenden `queued`, `starting`, `running`, `cancelling`, `succeeded`,
 - `POST /api/chat/manager`
 - `POST /api/manager/analyze`
 - `GET /api/manager/state`
+- `POST /api/manager/actions/:id/cancel`
+- `POST /api/manager/actions/:id/retry`
 - `POST /api/manager/plans/:id/confirm`
 - `POST /api/manager/plans/:id/discard`
 - `PATCH/DELETE /api/manager/plans/:id/tasks/:taskId`

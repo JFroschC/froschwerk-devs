@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { getAgent } from "../db/local.ts";
+import { getAgent, isManagerActionCancellationRequested } from "../db/local.ts";
 import { providerDefinition } from "./providers.mjs";
 import { checkRuntime } from "./runtime-check.mjs";
 import { extractUsage } from "./request-usage.mjs";
@@ -11,12 +11,21 @@ import { commandInvocation, runtimeEnvironment } from "./runtime-env.mjs";
 const codexHome = process.env.CODEX_HOME ?? join(process.env.USERPROFILE ?? process.env.HOME ?? process.cwd(), ".codex");
 const managerCodexModel = process.env.MANAGER_CODEX_MODEL ?? "gpt-5.6-luna";
 const managerCodexReasoningEffort = process.env.MANAGER_CODEX_REASONING_EFFORT ?? "medium";
+const cancellers = new Map();
+
+/** Allows the local API to interrupt the exact in-flight provider process for a manager attempt. */
+export function cancelManagerPrompt(actionId) {
+  const cancel = cancellers.get(actionId);
+  if (!cancel) return false;
+  cancel();
+  return true;
+}
 
 function codexWorkspaceArgs(workspace) {
   return existsSync(join(workspace, ".git")) ? [] : ["--skip-git-repo-check"];
 }
 
-function runCli(command, args, options, input, timeoutMs = Number(process.env.MANAGER_TIMEOUT_MS ?? 180000), onActivity = () => {}) {
+function runCli(command, args, options, input, timeoutMs = Number(process.env.MANAGER_TIMEOUT_MS ?? 180000), onActivity = () => {}, actionId) {
   return new Promise((resolvePromise, reject) => {
     const startedAt = Date.now();
     const timeoutSeconds = Math.round(timeoutMs / 1000);
@@ -29,7 +38,15 @@ function runCli(command, args, options, input, timeoutMs = Number(process.env.MA
       onActivity("waiting_for_provider");
       console.log(`[mira] läuft seit ${Math.round((Date.now() - startedAt) / 1000)}s (Timeout ${timeoutSeconds}s)`);
     }, 15_000);
-    const cleanup = () => { clearTimeout(timeout); clearInterval(heartbeat); };
+    const cleanup = () => { clearTimeout(timeout); clearInterval(heartbeat); if (actionId) cancellers.delete(actionId); };
+    const cancel = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      child.kill();
+      reject(new Error("MANAGER_ACTION_CANCELLED"));
+    };
+    if (actionId) cancellers.set(actionId, cancel);
     console.log(`[mira] Anfrage gestartet (Timeout ${timeoutSeconds}s)`);
     child.stdout.on("data", (chunk) => { stdout += chunk; onActivity("provider_output"); });
     child.stderr.on("data", (chunk) => { stderr += chunk; onActivity("provider_output"); });
@@ -116,9 +133,11 @@ ${prompt}`;
   const cliEnv = runtimeEnvironment(workspace, provider === "codex" ? { ...process.env, CODEX_HOME: codexHome } : process.env);
   if (provider === "claude") delete cliEnv.ANTHROPIC_API_KEY;
   const request = startAgentRequest({ projectId: context.projectId, agentId: manager?.id ?? "agent-manager", role: "manager", provider, model: provider === "codex" ? managerCodexModel : "claude-subscription", command: `${definition.command} ${args.join(" ")}`, prompt: managerPrompt });
+  context.onRequestStarted?.(request.requestId);
   try {
+    if (context.actionId && isManagerActionCancellationRequested(context.actionId)) throw new Error("MANAGER_ACTION_CANCELLED");
     reportAgentRequestActivity(request.requestId, "manager_provider");
-    const result = await runCli(definition.command, args, { cwd: workspace, env: cliEnv, windowsHide: true }, managerPrompt, undefined, (phase) => reportAgentRequestActivity(request.requestId, phase));
+    const result = await runCli(definition.command, args, { cwd: workspace, env: cliEnv, windowsHide: true }, managerPrompt, undefined, (phase) => reportAgentRequestActivity(request.requestId, phase), context.actionId);
     const raw = `${result.stdout}\n${result.stderr}`;
     const usage = extractUsage(raw);
     finishAgentRequest(request.requestId, { status: "succeeded", response: result.stdout, ...usage, startedAt: request.startedAt });
@@ -126,7 +145,8 @@ ${prompt}`;
       ? result.stdout.trim() || "Ich konnte gerade keine Antwort erzeugen."
       : extractClaudeReply(result.stdout) || "Ich konnte gerade keine Antwort erzeugen.";
   } catch (error) {
-    finishAgentRequest(request.requestId, { status: "failed", error: error instanceof Error ? error.message : String(error), startedAt: request.startedAt });
+    const message = error instanceof Error ? error.message : String(error);
+    finishAgentRequest(request.requestId, { status: message === "MANAGER_ACTION_CANCELLED" ? "cancelled" : "failed", error: message, startedAt: request.startedAt });
     throw error;
   }
 }

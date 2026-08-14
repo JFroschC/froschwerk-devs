@@ -240,6 +240,34 @@ CREATE TABLE IF NOT EXISTS manager_plans (
   confirmed_at TEXT,
   applied_at TEXT
 );
+CREATE TABLE IF NOT EXISTS manager_actions (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  conversation_id TEXT REFERENCES manager_conversations(id) ON DELETE SET NULL,
+  plan_id TEXT REFERENCES manager_plans(id) ON DELETE SET NULL,
+  analysis_snapshot_id TEXT REFERENCES project_analysis_snapshots(id) ON DELETE SET NULL,
+  agent_request_id TEXT REFERENCES agent_requests(id) ON DELETE SET NULL,
+  type TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'queued',
+  phase TEXT NOT NULL DEFAULT 'queued',
+  attempt_no INTEGER NOT NULL DEFAULT 1,
+  retry_of_action_id TEXT,
+  confirmation TEXT NOT NULL DEFAULT 'not_required',
+  input_json TEXT NOT NULL DEFAULT '{}',
+  result_json TEXT NOT NULL DEFAULT '{}',
+  error TEXT,
+  cancellation_requested_at TEXT,
+  started_at TEXT,
+  finished_at TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS manager_action_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  action_id TEXT NOT NULL REFERENCES manager_actions(id) ON DELETE CASCADE,
+  event_type TEXT NOT NULL,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS manager_plan_tasks (
   id TEXT PRIMARY KEY,
   plan_id TEXT NOT NULL REFERENCES manager_plans(id) ON DELETE CASCADE,
@@ -277,6 +305,9 @@ CREATE INDEX IF NOT EXISTS idx_manager_conversation_entries_created ON manager_c
 CREATE INDEX IF NOT EXISTS idx_manager_questions_conversation ON manager_questions(conversation_id, answered_at);
 CREATE INDEX IF NOT EXISTS idx_analysis_snapshots_project_created ON project_analysis_snapshots(project_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_manager_plans_project_updated ON manager_plans(project_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_manager_actions_project_created ON manager_actions(project_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_manager_actions_status ON manager_actions(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_manager_action_events_action_created ON manager_action_events(action_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_manager_plan_tasks_plan_order ON manager_plan_tasks(plan_id, sort_order);
 `;
 
@@ -352,6 +383,7 @@ function getDatabase() {
       migrateManagerOrchestration(openedDatabase);
       migrateAgentLifecycle(openedDatabase);
       seedDatabase(openedDatabase);
+      normalizeInitialWorkflowTask(openedDatabase);
       ensureDefaultAgents(openedDatabase);
       recoverStaleAgentRequests(openedDatabase);
       database = openedDatabase;
@@ -452,7 +484,6 @@ function migrateProjects(db: DatabaseSync) {
     db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_key_unique ON projects(key)");
   }
   const additions = [
-    ["process_identity", "TEXT"],
     ["type", "TEXT NOT NULL DEFAULT 'Tool'"],
     ["workspace_path", "TEXT NOT NULL DEFAULT ''"],
     ["start_command", "TEXT NOT NULL DEFAULT ''"],
@@ -538,6 +569,7 @@ function migrateAgents(db: DatabaseSync) {
 function migrateAgentLifecycle(db: DatabaseSync) {
   const columns = db.prepare("PRAGMA table_info(agent_runs)").all() as Row[];
   const additions = [
+    ["process_identity", "TEXT"],
     ["last_heartbeat_at", "TEXT"],
     ["last_activity_at", "TEXT"],
     ["current_phase", "TEXT"],
@@ -580,14 +612,14 @@ function seedDatabase(db: DatabaseSync) {
       ["FW-104", "Taskboard-Grundlayout und Navigation", "Ein übersichtliches Board für Projekte und Agentenläufe aufbauen.", "Done", "High", "agent-developer-1"],
       ["FW-108", "Manager-Chat mit Ticketaktionen", "Der Hauptmanager soll Tickets aus dem Chat anlegen und den nächsten Lauf starten können.", "In Progress", "Urgent", "agent-developer-1"],
       ["FW-111", "Testergebnisse direkt am Ticket speichern", "Testberichte, Logs und eine klare Pass/Fail-Rückmeldung am Ticket ablegen.", "Testing", "High", "agent-tester-1"],
-      ["FW-115", "MCP-Schnittstelle für Codex vorbereiten", "Werkzeuge definieren, mit denen Codex Tickets lesen, kommentieren und Status ändern kann.", "Ready", "Medium", "agent-developer-1"],
+      ["FW-115", "Run-Aktionssteuerung vorbereiten", "Sichere Start-, Stop- und Retry-Aktionen für Agentenläufe vorbereiten.", "Ready", "Medium", "agent-developer-1"],
       ["FW-118", "Retry- und Blockade-Regeln definieren", "Verhindern, dass ein fehlerhaftes Ticket endlos zwischen Entwickler und Tester pendelt.", "Review", "Low", "agent-manager"],
     ];
     const criteria: Record<string, string[]> = {
       "FW-104": ["Statusspalten sind sichtbar", "Tickets können geöffnet werden"],
       "FW-108": ["Chat ist sichtbar", "Neues Ticket kann aus einer Nachricht entstehen", "Nächste Aufgabe kann gestartet werden"],
       "FW-111": ["Testergebnis hat einen Status", "Fehler enthalten Reproduktionsschritte", "Manager erhält eine Rückmeldung"],
-      "FW-115": ["Tool-Vertrag ist dokumentiert", "Statusänderungen sind eingeschränkt", "Agentenläufe sind nachvollziehbar"],
+      "FW-115": ["Run-Aktionen sind serverseitig geprüft", "Aktive Prozesse bleiben geschützt", "Agentenläufe sind nachvollziehbar"],
       "FW-118": ["Maximale Versuche sind sichtbar", "Blocked eskaliert an den Benutzer"],
     };
     const insertTask = db.prepare("INSERT INTO tasks (id, project_id, title, description, status, priority, assignee_agent_id, retry_count, max_retries, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
@@ -609,6 +641,26 @@ function seedDatabase(db: DatabaseSync) {
     db.exec("ROLLBACK");
     throw error;
   }
+}
+
+/** The fixed demo ticket FW-115 is retained, but no longer represents a retired integration scope. */
+function normalizeInitialWorkflowTask(db: DatabaseSync) {
+  const task = db.prepare("SELECT id FROM tasks WHERE id = ? AND project_id = ?").get("FW-115", "project-agent-harness") as Row | undefined;
+  if (!task) return;
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.prepare("UPDATE tasks SET title = ?, description = ?, priority = ? WHERE id = ? AND project_id = ?").run(
+      "Run-Aktionssteuerung vorbereiten",
+      "Sichere Start-, Stop- und Retry-Aktionen für Agentenläufe vorbereiten.",
+      "Medium",
+      "FW-115",
+      "project-agent-harness",
+    );
+    db.prepare("DELETE FROM task_acceptance_criteria WHERE task_id = ?").run("FW-115");
+    const insertCriterion = db.prepare("INSERT INTO task_acceptance_criteria (task_id, text, sort_order) VALUES (?, ?, ?)");
+    ["Run-Aktionen sind serverseitig geprüft", "Aktive Prozesse bleiben geschützt", "Agentenläufe sind nachvollziehbar"].forEach((text, index) => insertCriterion.run("FW-115", text, index));
+    db.exec("COMMIT");
+  } catch (error) { db.exec("ROLLBACK"); throw error; }
 }
 
 function mapTask(db: DatabaseSync, row: Row) {
@@ -860,6 +912,52 @@ export function listTaskEvents(taskId: string) {
   }));
 }
 
+export function listProjectTaskEvents(projectId: string, limit = 100) {
+  const db = getDatabase();
+  const rows = db.prepare(`SELECT task_events.id, task_events.task_id AS taskId, tasks.title AS taskTitle,
+    task_events.event_type AS eventType, task_events.actor_type AS actorType, task_events.actor_id AS actorId,
+    task_events.payload_json AS payloadJson, task_events.created_at AS createdAt
+    FROM task_events JOIN tasks ON tasks.id = task_events.task_id
+    WHERE tasks.project_id = ? ORDER BY task_events.created_at DESC, task_events.id DESC LIMIT ?`).all(projectId, Math.max(1, Math.min(limit, 250))) as Row[];
+  return rows.map((row) => ({
+    id: row.id,
+    taskId: row.taskId,
+    taskTitle: row.taskTitle,
+    eventType: row.eventType,
+    actorType: row.actorType,
+    actorId: row.actorId,
+    payload: JSON.parse(String(row.payloadJson ?? "{}")) as unknown,
+    createdAt: row.createdAt,
+  }));
+}
+
+/**
+ * Persist the user's decision before an orchestration action is attempted.
+ * This is intentionally separate from lifecycle transitions: it records both
+ * declined confirmations and server-side rejections without letting the UI
+ * infer or alter a Run state.
+ */
+export function recordRunActionAudit(taskId: string, input: {
+  action: "start" | "retry" | "stop";
+  outcome: "confirmed" | "declined" | "rejected" | "accepted";
+  runId?: string;
+  role?: "developer" | "tester";
+  reason?: string;
+  resultRunId?: string;
+}) {
+  const db = getDatabase();
+  const task = db.prepare("SELECT id FROM tasks WHERE id = ?").get(taskId) as Row | undefined;
+  if (!task) return false;
+  addEventInternal(db, taskId, `agent.action_${input.outcome}`, "user", "workspace-owner", {
+    action: input.action,
+    runId: input.runId ?? null,
+    role: input.role ?? null,
+    reason: input.reason ?? null,
+    resultRunId: input.resultRunId ?? null,
+  }, timestamp());
+  return true;
+}
+
 export function addComment(taskId: string, input: { authorType?: string; authorId?: string; authorName?: string; body: string; runId?: string }) {
   const db = getDatabase();
   const now = timestamp();
@@ -867,35 +965,6 @@ export function addComment(taskId: string, input: { authorType?: string; authorI
   try {
     addCommentInternal(db, taskId, input.authorType ?? "user", input.authorId ?? "owner", input.authorName ?? "Du", input.body.trim(), now);
     addEventInternal(db, taskId, "comment.created", input.authorType ?? "user", input.authorId ?? "owner", { body: input.body, runId: input.runId }, now);
-    db.exec("COMMIT");
-  } catch (error) { db.exec("ROLLBACK"); throw error; }
-  return listTasks().find((task) => task.id === taskId);
-}
-
-const allowedMcpStatusTransitions: Record<string, string[]> = {
-  Ready: ["In Progress", "Blocked"],
-  "In Progress": ["Review", "Blocked"],
-  Review: ["Testing", "Changes Requested", "Blocked"],
-  Testing: ["Done", "Changes Requested", "Blocked"],
-  "Changes Requested": ["In Progress", "Ready", "Blocked"],
-  Blocked: ["Ready"],
-  Done: [],
-};
-
-export function transitionTaskStatus(taskId: string, input: { status: string; actorType: string; actorId: string; reason?: string; runId?: string }) {
-  const db = getDatabase();
-  const now = timestamp();
-  let fromStatus: string | undefined;
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    const row = db.prepare("SELECT status, obsolete_at AS obsoleteAt FROM tasks WHERE id = ?").get(taskId) as { status: string; obsoleteAt?: string | null } | undefined;
-    if (!row) { db.exec("ROLLBACK"); return undefined; }
-    if (row.obsoleteAt) throw new Error("Ein archiviertes, obsoletes Ticket kann nicht wieder in den Workflow verschoben werden");
-    fromStatus = row.status;
-    const allowedTargets = allowedMcpStatusTransitions[fromStatus] ?? [];
-    if (!allowedTargets.includes(input.status)) throw new Error(`Statuswechsel von ${fromStatus} nach ${input.status} ist nicht erlaubt`);
-    db.prepare("UPDATE tasks SET status = ?, retry_count = CASE WHEN ? THEN 0 ELSE retry_count END, updated_at = ? WHERE id = ?").run(input.status, fromStatus === "Blocked" && input.status === "Ready" ? 1 : 0, now, taskId);
-    addEventInternal(db, taskId, "mcp.status_changed", input.actorType, input.actorId, { fromStatus, toStatus: input.status, reason: input.reason ?? "", runId: input.runId }, now);
     db.exec("COMMIT");
   } catch (error) { db.exec("ROLLBACK"); throw error; }
   return listTasks().find((task) => task.id === taskId);
@@ -948,16 +1017,44 @@ export function getAgentRun(runId: string) {
   return { ...row, task: listTasks().find((task) => task.id === row.taskId) };
 }
 
+/**
+ * The UI deliberately receives an assembled, read-only run record.  Lifecycle
+ * decisions remain in the workflow services; this function only makes the
+ * already persisted audit trail inspectable in one request.
+ */
+export function getAgentRunDetail(runId: string) {
+  const db = getDatabase();
+  const run = getAgentRun(runId);
+  if (!run) return undefined;
+  const lease = db.prepare("SELECT acquired_at AS acquiredAt, expires_at AS expiresAt FROM agent_leases WHERE run_id = ?").get(runId) as Row | undefined;
+  const requests = db.prepare(`SELECT id, project_id AS projectId, task_id AS taskId, run_id AS runId, agent_id AS agentId,
+    role, provider, model, command, status, started_at AS startedAt, last_activity_at AS lastActivityAt,
+    current_phase AS currentPhase, finished_at AS finishedAt, duration_ms AS durationMs, input_chars AS inputChars,
+    output_chars AS outputChars, estimated_input_tokens AS estimatedInputTokens, estimated_output_tokens AS estimatedOutputTokens,
+    input_tokens AS inputTokens, output_tokens AS outputTokens, total_tokens AS totalTokens, prompt_hash AS promptHash,
+    prompt_preview AS promptPreview, response_preview AS responsePreview, error
+    FROM agent_requests WHERE run_id = ? ORDER BY started_at ASC, id ASC`).all(runId) as Row[];
+  const report = db.prepare("SELECT id, status, summary, checks_json AS checksJson, logs, created_at AS createdAt FROM test_reports WHERE agent_run_id = ? ORDER BY created_at DESC, id DESC LIMIT 1").get(runId) as Row | undefined;
+  return {
+    ...run,
+    lease: lease ? { acquiredAt: lease.acquiredAt, expiresAt: lease.expiresAt } : null,
+    requests,
+    testReport: report ? { id: report.id, status: report.status, summary: report.summary, checks: JSON.parse(String(report.checksJson ?? "[]")), logs: report.logs, createdAt: report.createdAt } : null,
+    events: listTaskEvents(String((run as Row).taskId)),
+  };
+}
+
 export function listAgentRuns(taskId?: string, projectId?: string) {
   const db = getDatabase();
   const rows = db.prepare(`SELECT agent_runs.id AS runId, agent_runs.task_id AS taskId, agent_runs.agent_id AS agentId,
     agent_runs.role, agent_runs.status, agent_runs.attempt_no AS attemptNo, agent_runs.summary, agent_runs.error, agent_runs.process_id AS processId, agent_runs.process_identity AS processIdentity,
     agent_runs.last_heartbeat_at AS lastHeartbeatAt, agent_runs.last_activity_at AS lastActivityAt, agent_runs.current_phase AS currentPhase,
     agent_runs.progress, agent_runs.exit_code AS exitCode, agent_runs.signal, agent_runs.termination_reason AS terminationReason,
-    agent_runs.cancellation_requested_at AS cancellationRequestedAt,
+    agent_runs.cancellation_requested_at AS cancellationRequestedAt, agent_leases.expires_at AS leaseExpiresAt,
     agent_runs.started_at AS startedAt, agent_runs.finished_at AS finishedAt, agent_runs.created_at AS createdAt,
     agents.name AS agentName, agents.provider
     FROM agent_runs JOIN agents ON agents.id = agent_runs.agent_id JOIN tasks ON tasks.id = agent_runs.task_id
+    LEFT JOIN agent_leases ON agent_leases.run_id = agent_runs.id
     WHERE (? IS NULL OR agent_runs.task_id = ?)
       AND (? IS NULL OR tasks.project_id = ?)
     ORDER BY agent_runs.created_at DESC, agent_runs.id DESC`).all(taskId ?? null, taskId ?? null, projectId ?? null, projectId ?? null) as Row[];
@@ -1595,6 +1692,177 @@ export function getLatestProjectAnalysisSnapshot(projectId: string) {
   const row = db.prepare(`SELECT id, project_id AS projectId, status, summary, snapshot_json AS snapshotJson, created_at AS createdAt
     FROM project_analysis_snapshots WHERE project_id = ? ORDER BY created_at DESC, id DESC LIMIT 1`).get(projectId) as Row | undefined;
   return row ? { id: row.id, projectId: row.projectId, status: row.status, summary: row.summary, snapshot: parseStoredJson<Record<string, unknown>>(row.snapshotJson, {}), createdAt: row.createdAt } : undefined;
+}
+
+type ManagerActionInput = {
+  projectId: string;
+  type: "analysis" | "planning" | "execute_plan";
+  conversationId?: string;
+  planId?: string;
+  confirmation?: "confirmed" | "not_required";
+  input?: unknown;
+  retryOfActionId?: string;
+};
+
+function mapManagerAction(db: DatabaseSync, row: Row) {
+  const events = db.prepare(`SELECT id, event_type AS eventType, payload_json AS payloadJson, created_at AS createdAt
+    FROM manager_action_events WHERE action_id = ? ORDER BY created_at ASC, id ASC`).all(row.id) as Row[];
+  return {
+    id: row.id,
+    projectId: row.projectId,
+    conversationId: row.conversationId ?? null,
+    planId: row.planId ?? null,
+    analysisSnapshotId: row.analysisSnapshotId ?? null,
+    agentRequestId: row.agentRequestId ?? null,
+    type: row.type,
+    status: row.status,
+    phase: row.phase,
+    attemptNo: Number(row.attemptNo ?? 1),
+    retryOfActionId: row.retryOfActionId ?? null,
+    confirmation: row.confirmation,
+    input: parseStoredJson<Record<string, unknown>>(row.inputJson, {}),
+    result: parseStoredJson<Record<string, unknown>>(row.resultJson, {}),
+    error: row.error ?? null,
+    cancellationRequestedAt: row.cancellationRequestedAt ?? null,
+    startedAt: row.startedAt ?? null,
+    finishedAt: row.finishedAt ?? null,
+    createdAt: row.createdAt,
+    events: events.map((event) => ({ id: Number(event.id), eventType: event.eventType, payload: parseStoredJson<Record<string, unknown>>(event.payloadJson, {}), createdAt: event.createdAt })),
+  };
+}
+
+function getManagerActionRow(db: DatabaseSync, actionId: string) {
+  return db.prepare(`SELECT id, project_id AS projectId, conversation_id AS conversationId, plan_id AS planId,
+    analysis_snapshot_id AS analysisSnapshotId, agent_request_id AS agentRequestId, type, status, phase,
+    attempt_no AS attemptNo, retry_of_action_id AS retryOfActionId, confirmation, input_json AS inputJson,
+    result_json AS resultJson, error, cancellation_requested_at AS cancellationRequestedAt,
+    started_at AS startedAt, finished_at AS finishedAt, created_at AS createdAt
+    FROM manager_actions WHERE id = ?`).get(actionId) as Row | undefined;
+}
+
+function addManagerActionEventInternal(db: DatabaseSync, actionId: string, eventType: string, payload: unknown, createdAt = timestamp()) {
+  db.prepare("INSERT INTO manager_action_events (action_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)").run(actionId, eventType, json(payload), createdAt);
+}
+
+export function getManagerAction(actionId: string) {
+  const db = getDatabase();
+  const row = getManagerActionRow(db, actionId);
+  return row ? mapManagerAction(db, row) : undefined;
+}
+
+export function listManagerActions(projectId: string, limit = 30) {
+  const db = getDatabase();
+  const rows = db.prepare(`SELECT id, project_id AS projectId, conversation_id AS conversationId, plan_id AS planId,
+    analysis_snapshot_id AS analysisSnapshotId, agent_request_id AS agentRequestId, type, status, phase,
+    attempt_no AS attemptNo, retry_of_action_id AS retryOfActionId, confirmation, input_json AS inputJson,
+    result_json AS resultJson, error, cancellation_requested_at AS cancellationRequestedAt,
+    started_at AS startedAt, finished_at AS finishedAt, created_at AS createdAt
+    FROM manager_actions WHERE project_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`).all(projectId, Math.max(1, Math.min(limit, 100))) as Row[];
+  return rows.map((row) => mapManagerAction(db, row));
+}
+
+export function createManagerAction(input: ManagerActionInput) {
+  const db = getDatabase();
+  if (!getProject(input.projectId)) throw new Error("Projekt wurde nicht gefunden");
+  if (input.conversationId) {
+    const conversation = getManagerConversation(input.conversationId);
+    if (!conversation || conversation.projectId !== input.projectId) throw new Error("Manager-Gespräch gehört nicht zum Projekt");
+  }
+  if (input.planId) {
+    const plan = getManagerPlan(input.planId);
+    if (!plan || plan.projectId !== input.projectId) throw new Error("Manager-Plan gehört nicht zum Projekt");
+  }
+  let attemptNo = 1;
+  if (input.retryOfActionId) {
+    const previous = getManagerActionRow(db, input.retryOfActionId);
+    if (!previous || previous.projectId !== input.projectId) throw new Error("Vorheriger Manager-Versuch wurde nicht gefunden");
+    if (!["failed", "cancelled"].includes(String(previous.status))) throw new Error("Nur ein fehlgeschlagener oder abgebrochener Manager-Versuch darf wiederholt werden");
+    attemptNo = Number(previous.attemptNo ?? 1) + 1;
+  }
+  const actionId = id("manager-action");
+  const now = timestamp();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.prepare(`INSERT INTO manager_actions (id, project_id, conversation_id, plan_id, type, status, phase, attempt_no,
+      retry_of_action_id, confirmation, input_json, result_json, created_at)
+      VALUES (?, ?, ?, ?, ?, 'queued', 'queued', ?, ?, ?, ?, '{}', ?)`)
+      .run(actionId, input.projectId, input.conversationId ?? null, input.planId ?? null, input.type, attemptNo,
+        input.retryOfActionId ?? null, input.confirmation ?? "not_required", json(input.input ?? {}), now);
+    addManagerActionEventInternal(db, actionId, "manager.action_queued", { type: input.type, confirmation: input.confirmation ?? "not_required", retryOfActionId: input.retryOfActionId ?? null }, now);
+    db.exec("COMMIT");
+  } catch (error) { db.exec("ROLLBACK"); throw error; }
+  return getManagerAction(actionId)!;
+}
+
+export function startManagerAction(actionId: string, phase = "starting") {
+  const db = getDatabase();
+  const action = getManagerActionRow(db, actionId);
+  if (!action) return undefined;
+  if (action.status !== "queued") throw new Error("Manager-Versuch ist nicht mehr startbar");
+  const now = timestamp();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.prepare("UPDATE manager_actions SET status = 'running', phase = ?, started_at = ? WHERE id = ? AND status = 'queued'").run(phase, now, actionId);
+    addManagerActionEventInternal(db, actionId, "manager.action_started", { phase }, now);
+    db.exec("COMMIT");
+  } catch (error) { db.exec("ROLLBACK"); throw error; }
+  return getManagerAction(actionId)!;
+}
+
+export function updateManagerAction(actionId: string, patch: { phase?: string; agentRequestId?: string; analysisSnapshotId?: string; planId?: string; result?: unknown }) {
+  const db = getDatabase();
+  const action = getManagerActionRow(db, actionId);
+  if (!action) return undefined;
+  if (!["queued", "running"].includes(String(action.status))) return getManagerAction(actionId);
+  const now = timestamp();
+  db.prepare(`UPDATE manager_actions SET phase = COALESCE(?, phase), agent_request_id = COALESCE(?, agent_request_id),
+    analysis_snapshot_id = COALESCE(?, analysis_snapshot_id), plan_id = COALESCE(?, plan_id), result_json = COALESCE(?, result_json) WHERE id = ?`).run(
+    patch.phase ?? null, patch.agentRequestId ?? null, patch.analysisSnapshotId ?? null, patch.planId ?? null,
+    patch.result === undefined ? null : json(patch.result), actionId,
+  );
+  addManagerActionEventInternal(db, actionId, "manager.action_progress", { phase: patch.phase, agentRequestId: patch.agentRequestId, analysisSnapshotId: patch.analysisSnapshotId, planId: patch.planId }, now);
+  return getManagerAction(actionId)!;
+}
+
+export function requestManagerActionCancellation(actionId: string) {
+  const db = getDatabase();
+  const action = getManagerActionRow(db, actionId);
+  if (!action) return { action: undefined, reason: "not_found" };
+  if (!["queued", "running"].includes(String(action.status))) return { action: mapManagerAction(db, action), reason: "not_active" };
+  const now = timestamp();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.prepare("UPDATE manager_actions SET cancellation_requested_at = ?, phase = 'cancelling' WHERE id = ? AND status IN ('queued', 'running')").run(now, actionId);
+    addManagerActionEventInternal(db, actionId, "manager.action_cancellation_requested", {}, now);
+    db.exec("COMMIT");
+  } catch (error) { db.exec("ROLLBACK"); throw error; }
+  return { action: getManagerAction(actionId)!, reason: undefined };
+}
+
+export function isManagerActionCancellationRequested(actionId: string) {
+  const db = getDatabase();
+  const row = db.prepare("SELECT cancellation_requested_at AS cancellationRequestedAt FROM manager_actions WHERE id = ?").get(actionId) as Row | undefined;
+  return Boolean(row?.cancellationRequestedAt);
+}
+
+export function finishManagerAction(actionId: string, input: { status: "succeeded" | "failed" | "cancelled"; phase?: string; result?: unknown; error?: string; analysisSnapshotId?: string; planId?: string }) {
+  const db = getDatabase();
+  const action = getManagerActionRow(db, actionId);
+  if (!action) return undefined;
+  if (!["queued", "running"].includes(String(action.status))) return getManagerAction(actionId);
+  const status = action.cancellationRequestedAt ? "cancelled" : input.status;
+  const now = timestamp();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.prepare(`UPDATE manager_actions SET status = ?, phase = ?, result_json = ?, error = ?, analysis_snapshot_id = COALESCE(?, analysis_snapshot_id),
+      plan_id = COALESCE(?, plan_id), finished_at = ? WHERE id = ?`).run(
+      status, input.phase ?? (status === "succeeded" ? "finished" : status), json(input.result ?? {}), input.error ?? null,
+      input.analysisSnapshotId ?? null, input.planId ?? null, now, actionId,
+    );
+    addManagerActionEventInternal(db, actionId, `manager.action_${status}`, { phase: input.phase ?? null, error: input.error ?? null, result: input.result ?? {} }, now);
+    db.exec("COMMIT");
+  } catch (error) { db.exec("ROLLBACK"); throw error; }
+  return getManagerAction(actionId)!;
 }
 
 function extractPlanTasks(actions: Record<string, unknown>[]) {

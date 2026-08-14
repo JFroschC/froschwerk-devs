@@ -1,4 +1,4 @@
-import { findActiveManagerConversation, getLatestManagerPlan, getLatestProjectAnalysisSnapshot, getProject } from "../../../../db/local.ts";
+import { findActiveManagerConversation, getLatestManagerPlan, getLatestProjectAnalysisSnapshot, getProject, listManagerActions } from "../../../../db/local.ts";
 
 export const runtime = "nodejs";
 
@@ -10,5 +10,6 @@ export async function GET(request: Request) {
     conversation: findActiveManagerConversation(projectId),
     plan: getLatestManagerPlan(projectId),
     analysisSnapshot: getLatestProjectAnalysisSnapshot(projectId),
+    actions: listManagerActions(projectId),
   });
 }

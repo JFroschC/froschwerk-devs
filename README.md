@@ -18,11 +18,13 @@ deren lokale Abo-Logins.
 - sequenzieller Autoprozess: `Review → Tester → Done → nächstes Ready → Entwickler → Review`
 - vollständiges Projekt-Testgate vor der Übergabe eines Entwicklerlaufs an den Tester
 - isoliertes Git-Vertrauen für Workspaces eines getrennten Windows-Benutzers
-- vorbereiteter MCP-Tool-Vertrag; ein ausführbarer MCP-Server ist noch nicht enthalten
 
-Der Manager- und Workflow-Kern ist nutzbar. Der nächste Ausbau ist nicht ein erster
-Heartbeat, sondern ein vollständiges Agent-Lifecycle-Management mit klaren
-Run-Zuständen, Supervisor, Run-Details und sicheren Stop-/Retry-Abläufen.
+Der Manager- und Workflow-Kern ist nutzbar. Lifecycle-Daten werden per Polling als
+Agentenübersicht, Run-Historie und Run-Details mit Requests, Testchecks und Events
+dargestellt. Start, Stop und Retry werden nach expliziter Bestätigung serverseitig
+validiert. Manager-Analysen, Planungen und bestätigte Plan-Ausführungen besitzen
+zusätzlich eine persistente Auditspur mit Status, Phase, Request-, Plan- und
+Ergebnisverknüpfung sowie Cancel/Retry.
 
 Den verifizierten Stand und bekannte Einschränkungen beschreibt
 [CURRENT-STATUS.md](./docs/CURRENT-STATUS.md). Die priorisierten nächsten Schritte
@@ -72,7 +74,23 @@ Run; der automatische Pfad ist damit derzeit bewusst sequenziell.
 Entwickler und Tester verlängern ihre Lease alle 30 Sekunden. Die Standard-TTL beträgt
 120 Sekunden. Abgelaufene Leases und verwaiste Prozesse werden begrenzt wiederhergestellt.
 Das ist die vorhandene technische Heartbeat-Basis; eine sichtbare
-`lastHeartbeatAt`-/Lifecycle-Historie fehlt noch.
+`lastHeartbeatAt`-/Lifecycle-Historie ist in der Agenten- und Run-Ansicht verfügbar.
+
+## Run-Aktionen und Auditspur
+
+Die UI leitet keine Lifecycle-Übergänge selbst ab. Sie fordert stattdessen eine
+Bestätigung an und ruft danach die lokale API auf:
+
+- `POST /api/tasks/:id/run-action` für Start oder Retry eines Entwickler- bzw.
+  Tester-Runs;
+- `POST /api/agent-runs/:id/action` für einen Stop.
+
+Der Server prüft Ticketstatus, aktive Runs, Rolle, Retry-Vorgänger und verfügbare
+Kapazität erneut. Eine abgelehnte Bestätigung, eine serverseitige Ablehnung und eine
+akzeptierte Aktion erscheinen als `agent.action_*`-Event. Ein Stop verbleibt in
+`cancelling`, bis die Prozessidentität sicher als beendet bestätigt wurde. Ein Retry
+akzeptiert nur `failed`, `timed_out`, `cancelled` oder `lost` und erzeugt immer einen
+neuen Run; frühere Requests, Logs und Testergebnisse bleiben unverändert.
 
 ## Provider prüfen
 
@@ -121,7 +139,6 @@ Node-Test-Suite aus.
 - [Roadmap](./docs/ROADMAP.md)
 - [SQLite und Datenmodell](./docs/DATABASE.md)
 - [Provider und Agentenzuordnung](./docs/PROVIDERS.md)
-- [MCP-Tool-Vertrag](./docs/MCP-TOOLS.md)
 - [Operative Übergabe vom 13.08.2026](./docs/UEBERGABE-2026-08-13.md)
 - [Historische Dokumente](./docs/archive/README.md)
 
