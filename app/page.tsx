@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, type CSSProperties, type PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type Status = "Ready" | "In Progress" | "Review" | "Testing" | "Changes Requested" | "Blocked" | "Done";
 type Priority = "Urgent" | "High" | "Medium" | "Low";
@@ -146,7 +146,9 @@ type HarnessAgent = {
   maxConcurrency: number;
 };
 
-type WorkspaceView = "board" | "agents" | "activity";
+type WorkspaceView = "board" | "agents" | "activity" | "runs";
+type RightPane = "detail" | "chat";
+type AgentTab = "output" | "requests" | "events" | "tests";
 
 type PendingRunAction = {
   target: "task" | "run";
@@ -251,35 +253,11 @@ type ManagerAction = {
   events: Array<{ id: number; eventType: string; createdAt: string }>;
 };
 type ManagerStateWithActions = ManagerState & { actions?: ManagerAction[] };
-type ChatSize = { width: number; height: number };
-type BoardDensity = "compact" | "standard" | "wide";
 
 const statuses: Status[] = ["Ready", "In Progress", "Review", "Testing", "Changes Requested", "Blocked", "Done"];
-const chatSizeStorageKey = "froschwerk-chat-size";
+const activeStatuses = ["queued", "starting", "running", "cancelling"];
 const activeProjectStorageKey = "froschwerk-active-project";
-const boardDensityStorageKey = "froschwerk-board-density";
-const managerPanelStorageKey = "froschwerk-manager-panel-height";
-const overviewPanelStorageKey = "froschwerk-overview-panel-height";
 const defaultProjectId = "project-agent-harness";
-const defaultChatSize: ChatSize = { width: 460, height: 680 };
-const minimumChatSize: ChatSize = { width: 360, height: 420 };
-const defaultManagerPanelHeight = 360;
-const minimumManagerPanelHeight = 170;
-const defaultOverviewPanelHeight = 420;
-const minimumOverviewPanelHeight = 230;
-
-function initialChatSize(): ChatSize {
-  if (typeof window === "undefined") return defaultChatSize;
-  try {
-    const saved = JSON.parse(window.localStorage.getItem(chatSizeStorageKey) ?? "null") as Partial<ChatSize> | null;
-    if (typeof saved?.width === "number" && typeof saved.height === "number") {
-      return { width: Math.max(minimumChatSize.width, Math.round(saved.width)), height: Math.max(minimumChatSize.height, Math.round(saved.height)) };
-    }
-  } catch {
-    // A malformed local preference should never prevent the board from loading.
-  }
-  return defaultChatSize;
-}
 
 function browserPreference(key: string) {
   if (typeof window === "undefined") return "";
@@ -288,21 +266,6 @@ function browserPreference(key: string) {
   } catch {
     return "";
   }
-}
-
-function initialBoardDensity(): BoardDensity {
-  const saved = browserPreference(boardDensityStorageKey);
-  return saved === "compact" || saved === "wide" || saved === "standard" ? saved : "standard";
-}
-
-function initialManagerPanelHeight() {
-  const saved = Number(browserPreference(managerPanelStorageKey));
-  return Number.isFinite(saved) && saved >= minimumManagerPanelHeight ? Math.round(saved) : defaultManagerPanelHeight;
-}
-
-function initialOverviewPanelHeight() {
-  const saved = Number(browserPreference(overviewPanelStorageKey));
-  return Number.isFinite(saved) && saved >= minimumOverviewPanelHeight ? Math.round(saved) : defaultOverviewPanelHeight;
 }
 
 const seedTasks: Task[] = [
@@ -376,6 +339,40 @@ const initialMessages: ChatMessage[] = [
   { id: "m2", sender: "Manager", text: "Du kannst mir Aufgaben in normaler Sprache geben. Ich erstelle daraus ein Ticket und halte den Verlauf direkt am Board fest." },
 ];
 
+const roleLabel = (role: string) => role === "manager" ? "Hauptmanager" : role === "tester" ? "Tester" : "Entwickler";
+const roleDe = (role: string) => role === "manager" ? "Manager" : role === "tester" ? "Tester" : "Entwickler";
+const providerLabel = (provider: string) => provider === "claude" ? "Claude-Abo" : "Codex-Abo";
+
+function agentDuty(role: string) {
+  if (role === "manager") return { file: "agents/manager.md", text: "Analysiere das Projekt lesend, stelle Rückfragen und schlage bestätigungspflichtige Pläne vor. Lege Tickets ausschließlich als atomaren Batch an und triff keine unbestätigten Änderungen am Board." };
+  if (role === "tester") return { file: "agents/tester.md", text: "Prüfe genau ein an dich übergebenes Ticket gegen seine Akzeptanzkriterien, führe das Projekt-Testgate aus und halte ein klares Pass/Fail mit Reproduktionsschritten fest. Verändere keinen Produktivcode." };
+  return { file: "agents/developer.md", text: "Setze genau ein Ticket um. Halte dich an die Akzeptanzkriterien, ändere nur Dateien im Arbeitsverzeichnis und starte am Ende das Projekt-Testgate. Melde Blockaden zurück, statt Annahmen zu treffen." };
+}
+
+function agentRights(role: string): Array<{ text: string; granted: boolean }> {
+  if (role === "manager") return [
+    { text: "Projekt lesend analysieren", granted: true },
+    { text: "Pläne vorschlagen und Tickets als Batch anlegen", granted: true },
+    { text: "Provider über das lokale Abo ansprechen", granted: true },
+    { text: "Produktivcode direkt ändern", granted: false },
+    { text: "Läufe erzwingen ohne Bestätigung", granted: false },
+  ];
+  if (role === "tester") return [
+    { text: "Dateien lesen", granted: true },
+    { text: "Testgate ausführen", granted: true },
+    { text: "Testergebnis am Ticket speichern", granted: true },
+    { text: "Produktivcode ändern", granted: false },
+    { text: "Ticket anlegen oder löschen", granted: false },
+  ];
+  return [
+    { text: "Dateien lesen und ändern", granted: true },
+    { text: "Testgate ausführen", granted: true },
+    { text: "Ticketstatus auf Review setzen", granted: true },
+    { text: "Tickets anlegen oder löschen", granted: false },
+    { text: "Netzwerkzugriff außerhalb des Providers", granted: false },
+  ];
+}
+
 export default function Home() {
   const [tasks, setTasks] = useState<Task[]>(seedTasks);
   const [selectedId, setSelectedId] = useState("FW-108");
@@ -395,9 +392,12 @@ export default function Home() {
   const [agentRuns, setAgentRuns] = useState<AgentRun[]>([]);
   const [taskEvents, setTaskEvents] = useState<TaskEvent[]>([]);
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("board");
+  const [rightPane, setRightPane] = useState<RightPane>("detail");
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+  const [agentTab, setAgentTab] = useState<AgentTab>("output");
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedRun, setSelectedRun] = useState<AgentRunDetail | null>(null);
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const [pendingRunAction, setPendingRunAction] = useState<PendingRunAction | null>(null);
   const [runActionSubmitting, setRunActionSubmitting] = useState(false);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -408,40 +408,11 @@ export default function Home() {
   const [managerState, setManagerState] = useState<ManagerStateWithActions>({});
   const [questionAnswers, setQuestionAnswers] = useState<Record<string, string>>({});
   const [lastSyncedAt, setLastSyncedAt] = useState("");
-  const [chatSize, setChatSize] = useState<ChatSize>(initialChatSize);
-  const [boardDensity, setBoardDensity] = useState<BoardDensity>(initialBoardDensity);
-  const [managerPanelHeight, setManagerPanelHeight] = useState(initialManagerPanelHeight);
-  const [overviewPanelHeight, setOverviewPanelHeight] = useState(initialOverviewPanelHeight);
-  const [isChatResizing, setIsChatResizing] = useState(false);
-  const [isManagerPanelResizing, setIsManagerPanelResizing] = useState(false);
-  const [isOverviewPanelResizing, setIsOverviewPanelResizing] = useState(false);
-  const [isChatOpen, setIsChatOpen] = useState(true);
   const chatMessagesRef = useRef<HTMLDivElement>(null);
+  const logRef = useRef<HTMLDivElement>(null);
   const lastChatMessageIdRef = useRef("");
   const activeProjectIdRef = useRef(activeProjectId);
   const refreshSequenceRef = useRef(0);
-  const chatResizeRef = useRef<{ startX: number; startY: number; width: number; height: number } | null>(null);
-  const managerPanelResizeRef = useRef<{ startY: number; height: number } | null>(null);
-  const overviewPanelResizeRef = useRef<{ startY: number; height: number } | null>(null);
-
-  const clampChatSize = useCallback((size: ChatSize): ChatSize => {
-    const maxWidth = Math.max(minimumChatSize.width, window.innerWidth - 250);
-    const maxHeight = Math.max(minimumChatSize.height, window.innerHeight - 24);
-    return {
-      width: Math.min(Math.max(Math.round(size.width), minimumChatSize.width), maxWidth),
-      height: Math.min(Math.max(Math.round(size.height), minimumChatSize.height), maxHeight),
-    };
-  }, []);
-
-  const clampManagerPanelHeight = useCallback((height: number) => {
-    const maximum = Math.max(minimumManagerPanelHeight, chatSize.height - 230);
-    return Math.min(Math.max(Math.round(height), minimumManagerPanelHeight), maximum);
-  }, [chatSize.height]);
-
-  const clampOverviewPanelHeight = useCallback((height: number) => {
-    const maximum = Math.max(minimumOverviewPanelHeight, window.innerHeight - 230);
-    return Math.min(Math.max(Math.round(height), minimumOverviewPanelHeight), maximum);
-  }, []);
 
   const refreshWorkspace = useCallback(async (showError = false) => {
     const refreshSequence = ++refreshSequenceRef.current;
@@ -506,141 +477,11 @@ export default function Home() {
 
   useEffect(() => {
     try {
-      window.localStorage.setItem(chatSizeStorageKey, JSON.stringify(chatSize));
-    } catch {
-      // The chat remains resizable even when browser storage is unavailable.
-    }
-  }, [chatSize]);
-
-  useEffect(() => {
-    try {
       window.localStorage.setItem(activeProjectStorageKey, activeProjectId);
     } catch {
       // Project selection remains available for the current browser session.
     }
   }, [activeProjectId]);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(boardDensityStorageKey, boardDensity);
-    } catch {
-      // The board remains usable even when browser storage is unavailable.
-    }
-  }, [boardDensity]);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(managerPanelStorageKey, String(managerPanelHeight));
-    } catch {
-      // The split remains adjustable for the current browser session.
-    }
-  }, [managerPanelHeight]);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(overviewPanelStorageKey, String(overviewPanelHeight));
-    } catch {
-      // The workspace split remains adjustable for the current browser session.
-    }
-  }, [overviewPanelHeight]);
-
-  useEffect(() => {
-    const handlePointerMove = (event: PointerEvent) => {
-      const resizing = chatResizeRef.current;
-      if (!resizing) return;
-      setChatSize(clampChatSize({
-        width: resizing.width + resizing.startX - event.clientX,
-        height: resizing.height + resizing.startY - event.clientY,
-      }));
-    };
-    const stopResizing = () => {
-      if (!chatResizeRef.current) return;
-      chatResizeRef.current = null;
-      setIsChatResizing(false);
-    };
-    const constrainToViewport = () => setChatSize((current) => clampChatSize(current));
-    window.addEventListener("pointermove", handlePointerMove);
-    window.addEventListener("pointerup", stopResizing);
-    window.addEventListener("pointercancel", stopResizing);
-    window.addEventListener("resize", constrainToViewport);
-    return () => {
-      window.removeEventListener("pointermove", handlePointerMove);
-      window.removeEventListener("pointerup", stopResizing);
-      window.removeEventListener("pointercancel", stopResizing);
-      window.removeEventListener("resize", constrainToViewport);
-    };
-  }, [clampChatSize]);
-
-  const startChatResize = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    chatResizeRef.current = { startX: event.clientX, startY: event.clientY, width: chatSize.width, height: chatSize.height };
-    event.currentTarget.setPointerCapture(event.pointerId);
-    setIsChatResizing(true);
-  }, [chatSize]);
-
-  const resetChatSize = useCallback(() => setChatSize(clampChatSize(defaultChatSize)), [clampChatSize]);
-
-  useEffect(() => {
-    const resizePlanPanel = (event: PointerEvent) => {
-      const resizing = managerPanelResizeRef.current;
-      if (!resizing) return;
-      setManagerPanelHeight(clampManagerPanelHeight(resizing.height + resizing.startY - event.clientY));
-    };
-    const stopResizing = () => {
-      if (!managerPanelResizeRef.current) return;
-      managerPanelResizeRef.current = null;
-      setIsManagerPanelResizing(false);
-    };
-    window.addEventListener("pointermove", resizePlanPanel);
-    window.addEventListener("pointerup", stopResizing);
-    window.addEventListener("pointercancel", stopResizing);
-    return () => {
-      window.removeEventListener("pointermove", resizePlanPanel);
-      window.removeEventListener("pointerup", stopResizing);
-      window.removeEventListener("pointercancel", stopResizing);
-    };
-  }, [clampManagerPanelHeight]);
-
-  const startManagerPanelResize = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    managerPanelResizeRef.current = { startY: event.clientY, height: managerPanelHeight };
-    event.currentTarget.setPointerCapture(event.pointerId);
-    setIsManagerPanelResizing(true);
-  }, [managerPanelHeight]);
-
-  useEffect(() => {
-    const resizeOverviewPanel = (event: PointerEvent) => {
-      const resizing = overviewPanelResizeRef.current;
-      if (!resizing) return;
-      setOverviewPanelHeight(clampOverviewPanelHeight(resizing.height + event.clientY - resizing.startY));
-    };
-    const stopResizing = () => {
-      if (!overviewPanelResizeRef.current) return;
-      overviewPanelResizeRef.current = null;
-      setIsOverviewPanelResizing(false);
-    };
-    const constrainToViewport = () => setOverviewPanelHeight((current) => clampOverviewPanelHeight(current));
-    window.addEventListener("pointermove", resizeOverviewPanel);
-    window.addEventListener("pointerup", stopResizing);
-    window.addEventListener("pointercancel", stopResizing);
-    window.addEventListener("resize", constrainToViewport);
-    return () => {
-      window.removeEventListener("pointermove", resizeOverviewPanel);
-      window.removeEventListener("pointerup", stopResizing);
-      window.removeEventListener("pointercancel", stopResizing);
-      window.removeEventListener("resize", constrainToViewport);
-    };
-  }, [clampOverviewPanelHeight]);
-
-  const startOverviewPanelResize = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    overviewPanelResizeRef.current = { startY: event.clientY, height: overviewPanelHeight };
-    event.currentTarget.setPointerCapture(event.pointerId);
-    setIsOverviewPanelResizing(true);
-  }, [overviewPanelHeight]);
 
   useEffect(() => {
     let cancelled = false;
@@ -674,25 +515,11 @@ export default function Home() {
     container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
   }, [chat]);
 
-  /*
-    Promise.all([fetch("/api/tasks"), fetch("/api/chat"), fetch("/api/agents")])
-      .then(async ([tasksResponse, chatResponse, agentsResponse]) => {
-        if (!tasksResponse.ok || !chatResponse.ok || !agentsResponse.ok) throw new Error("SQLite API unavailable");
-        const tasksPayload = await tasksResponse.json() as { tasks: Task[] };
-        const chatPayload = await chatResponse.json() as { messages: ChatMessage[] };
-        const agentsPayload = await agentsResponse.json() as { agents: HarnessAgent[] };
-        if (!cancelled) {
-          setTasks(tasksPayload.tasks);
-          setChat(chatPayload.messages);
-          setAgents(agentsPayload.agents);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) setDbError("SQLite ist noch nicht erreichbar. Die Anzeige nutzt vorübergehend die Startdaten.");
-      });
-    return () => { cancelled = true; };
-  }, []);
-  */
+  useEffect(() => {
+    if (workspaceView === "agents" && agentTab === "output" && logRef.current) {
+      logRef.current.scrollTop = logRef.current.scrollHeight;
+    }
+  }, [taskEvents, workspaceView, agentTab]);
 
   async function refreshProviders() {
     try {
@@ -796,16 +623,10 @@ export default function Home() {
 
   const selectedTask = tasks.find((task) => task.id === selectedId) ?? tasks[0];
   const activeProject = projects.find((project) => project.id === activeProjectId) ?? projects[0];
-  const selectedAgent = agents.find((agent) => agent.id === selectedAgentId) ?? null;
   const selectedTaskRuns = selectedTask ? agentRuns.filter((run) => run.taskId === selectedTask.id) : [];
   const retryableRun = selectedTaskRuns.find((run) => ["failed", "timed_out", "cancelled", "lost"].includes(run.status));
   const activeManagerPlan = managerState.plan ?? managerState.conversation?.plan;
-  const hasManagerWorkbench = Boolean(managerState.analysisSnapshot || managerState.conversation?.status === "needs_input" || activeManagerPlan);
-  const stats = useMemo(() => ({
-    active: tasks.filter((task) => task.status === "In Progress").length,
-    review: tasks.filter((task) => task.status === "Review" || task.status === "Testing").length,
-    done: tasks.filter((task) => task.status === "Done").length,
-  }), [tasks]);
+  const hasManagerWorkbench = Boolean(managerState.analysisSnapshot || managerState.conversation?.status === "needs_input" || activeManagerPlan || (managerState.actions?.length ?? 0) > 0);
 
   const displayedAgents = agents.length > 0 ? agents : [
     { id: "agent-manager", name: "Mira", role: "manager" as const, provider: "codex" as const, status: "online", maxConcurrency: 1 },
@@ -813,6 +634,21 @@ export default function Home() {
     { id: "agent-developer-2", name: "Dev Agent 2", role: "developer" as const, provider: "claude" as const, status: "offline", maxConcurrency: 1 },
     { id: "agent-tester-1", name: "QA Bot", role: "tester" as const, provider: "codex" as const, status: "online", maxConcurrency: 2 },
   ];
+  const agentForPage = displayedAgents.find((agent) => agent.id === selectedAgentId) ?? displayedAgents[0] ?? null;
+
+  const runningCount = agentRuns.filter((run) => activeStatuses.includes(run.status)).length;
+  const attention = useMemo(() => {
+    const notes: string[] = [];
+    const active = agentRuns.find((run) => activeStatuses.includes(run.status));
+    if (active) notes.push(`${active.agentName} arbeitet an ${active.taskId}`);
+    const waiting = tasks.filter((task) => task.status === "Review").length;
+    if (waiting > 0) notes.push(`${waiting} ${waiting === 1 ? "Ticket wartet" : "Tickets warten"} auf deine Freigabe`);
+    const blocked = tasks.filter((task) => task.status === "Blocked").length;
+    if (blocked > 0) notes.push(`${blocked} blockiert`);
+    if (providers.claude && providers.claude.installed && !providers.claude.loggedIn) notes.push("Claude-Login fehlt");
+    const heading = `${tasks.length} ${tasks.length === 1 ? "Ticket" : "Tickets"}, ${runningCount === 0 ? "keiner läuft" : runningCount === 1 ? "einer läuft" : `${runningCount} laufen`}.`;
+    return { heading, sub: notes.length ? notes.join(" · ") : "Alles ruhig im Projekt." };
+  }, [tasks, agentRuns, providers, runningCount]);
 
   async function updateTask(id: string, patch: Partial<Task>) {
     try {
@@ -858,6 +694,7 @@ export default function Home() {
       const payload = await response.json() as { task: Task };
       setTasks((current) => [payload.task, ...current]);
       setSelectedId(payload.task.id);
+      setRightPane("detail");
       setNewTitle("");
       setNewDescription("");
       setShowCreate(false);
@@ -975,6 +812,7 @@ export default function Home() {
       if (!response.ok || !payload.analysisSnapshot) throw new Error(payload.error || "Projektanalyse konnte nicht gestartet werden");
       setManagerState((current) => ({ ...current, analysisSnapshot: payload.analysisSnapshot, actions: payload.action ? [payload.action, ...(current.actions ?? []).filter((action) => action.id !== payload.action?.id)] : current.actions }));
       if (payload.message) setChat((current) => [...current, payload.message!]);
+      setRightPane("chat");
     } catch (error) {
       setDbError(error instanceof Error ? error.message : "Projektanalyse konnte nicht gestartet werden");
     }
@@ -1074,6 +912,7 @@ export default function Home() {
     const text = rawText.trim();
     if (!text) return;
     setChatInput("");
+    setRightPane("chat");
     const saved = await appendChat("user", text);
     if (saved) {
       if (managerState.conversation?.status === "needs_input") await askLiveManager(text, managerState.conversation.id);
@@ -1086,9 +925,32 @@ export default function Home() {
     void processChatText(chatInput);
   }
 
+  function openRunDrawer(runId: string) {
+    setSelectedRunId(runId);
+    setDrawerOpen(true);
+  }
+
+  function closeRunDrawer() {
+    setDrawerOpen(false);
+    setSelectedRunId(null);
+  }
+
+  function openAgent(agentId: string) {
+    setSelectedAgentId(agentId);
+    setAgentTab("output");
+    setWorkspaceView("agents");
+  }
+
+  function selectCard(id: string) {
+    setSelectedId(id);
+    setRightPane("detail");
+  }
+
   function statusLabel(status: Status) {
     if (status === "Ready") return "Bereit";
     if (status === "In Progress") return "In Arbeit";
+    if (status === "Review") return "Review";
+    if (status === "Testing") return "Testing";
     if (status === "Changes Requested") return "Änderungen nötig";
     if (status === "Blocked") return "Blockiert";
     if (status === "Done") return "Erledigt";
@@ -1099,6 +961,21 @@ export default function Home() {
     if (!value) return "nicht vorhanden";
     const date = new Date(value);
     return Number.isNaN(date.getTime()) ? "historisch unvollständig" : date.toLocaleString("de-DE", { dateStyle: "short", timeStyle: "medium" });
+  }
+
+  function formatClock(value?: string | null) {
+    if (!value) return "–";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? "–" : date.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  }
+
+  function relativeAge(value?: string | null) {
+    if (!value) return "nicht gemeldet";
+    const ms = Date.parse(new Date().toISOString()) - Date.parse(value);
+    if (!Number.isFinite(ms)) return "unbekannt";
+    if (ms < 60_000) return `vor ${Math.max(0, Math.round(ms / 1000))} s`;
+    if (ms < 3_600_000) return `vor ${Math.round(ms / 60_000)} Min.`;
+    return `vor ${Math.round(ms / 3_600_000)} h`;
   }
 
   function formatRunDuration(run: AgentRun) {
@@ -1114,97 +991,582 @@ export default function Home() {
     return ({ queued: "wartet", starting: "startet", running: "arbeitet", cancelling: "beendet kooperativ", succeeded: "erfolgreich", failed: "fehlgeschlagen", timed_out: "Zeitüberschreitung", cancelled: "abgebrochen", lost: "verloren" } as Record<string, string>)[status] ?? status;
   }
 
-  return (
-    <main className="app-shell" style={{ "--chat-panel-width": `${chatSize.width}px`, "--chat-panel-height": `${chatSize.height}px`, "--chat-panel-space": isChatOpen ? `${chatSize.width}px` : "0px", "--manager-workbench-height": `${managerPanelHeight}px`, "--workspace-overview-height": `${overviewPanelHeight}px` } as CSSProperties}>
-      <aside className="sidebar">
-        <div className="brand"><span className="brand-mark">◈</span><span>Froschwerk</span><small>AGENT HARNESS</small></div>
-        <label className="workspace-switcher"><span className="status-dot" /><select value={activeProjectId} onChange={(event) => { setTasks([]); setChat([]); setRuntimeCheck(null); setSelectedId(""); setLastSyncedAt(""); setActiveProjectId(event.target.value); }} aria-label="Aktives Projekt auswählen">{projects.map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select><span className="chevron">⌄</span></label>
-        <nav className="side-nav" aria-label="Hauptnavigation">
-          <button className={`nav-item ${workspaceView === "board" ? "active" : ""}`} onClick={() => setWorkspaceView("board")}><span>▦</span> Board <b>{tasks.length}</b></button>
-          <button className={`nav-item ${workspaceView === "agents" ? "active" : ""}`} onClick={() => setWorkspaceView("agents")}><span>◎</span> Agenten</button>
-          <button className={`nav-item ${workspaceView === "activity" ? "active" : ""}`} onClick={() => setWorkspaceView("activity")}><span>◷</span> Aktivität</button>
-        </nav>
-        <div className="side-section-label project-label">PROJEKT <button className="sidebar-action" onClick={() => openProjectForm()} aria-label="Neues Projekt anlegen">＋</button></div>
-        <button className="project-row active-project" onClick={() => openProjectForm(activeProject)}><span className="project-icon">{activeProject?.key.slice(0, 1) ?? "P"}</span><span><strong>{activeProject?.name ?? "Projekt auswählen"}</strong><small>{activeProject?.type ?? ""}</small></span><span className="more">•••</span></button>
-        <div className="side-section-label">AGENTENSTATUS</div>
-        {displayedAgents.map((agent) => { const avatar = agent.role === "manager" ? "M" : agent.role === "tester" ? "Q" : "D"; const statusClass = agent.status === "online" ? "online" : agent.status === "busy" ? "busy" : "offline-dot"; const selectAgent = () => { setSelectedAgentId(agent.id); setWorkspaceView("agents"); }; return <div className={`agent-row ${selectedAgentId === agent.id ? "selected" : ""}`} key={agent.id} role="button" tabIndex={0} onClick={selectAgent} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectAgent(); } }}><span className={`avatar ${agent.role}`}>{avatar}</span><span><strong>{agent.name}</strong><small>{agent.role === "manager" ? "Hauptmanager" : agent.role === "tester" ? "Tester" : "Entwickler"}</small><select className="agent-provider-select" value={agent.provider} onClick={(event) => event.stopPropagation()} onChange={(event) => void updateAgentProvider(agent.id, event.target.value as HarnessAgent["provider"])} aria-label={`${agent.name} Provider`}><option value="codex">Codex-Abo</option><option value="claude">Claude-Abo</option></select></span><i className={statusClass} /></div>; })}
-        <div className="side-section-label provider-label">VERBINDUNGEN <button className="provider-refresh" onClick={() => void refreshProviders()} aria-label="Providerstatus aktualisieren">↻</button></div>
-        {(["codex", "claude"] as const).map((id) => { const provider = providers[id]; return <div className="provider-row" key={id}><span className={`provider-icon ${id}`}>{id === "codex" ? "C" : "A"}</span><span><strong>{provider?.label ?? (id === "codex" ? "OpenAI Codex" : "Claude Code")}</strong><small>{provider?.loggedIn ? `${provider.authMethod ?? "Abo"}${provider.subscriptionType ? ` · ${provider.subscriptionType}` : ""}` : provider?.installed ? "Nicht angemeldet" : "Status wird geprüft …"}</small></span><i className={provider?.loggedIn && !provider.apiKeyDetected ? "online" : provider?.installed ? "busy" : "offline-dot"} /></div>; })}
-        <div className="sidebar-bottom"><div className="user-card"><span className="avatar user">F</span><span><strong>FroschiO</strong><small>Workspace Owner</small></span><span>•••</span></div><div className="sidebar-foot">⌘ K <span>Command palette</span></div></div>
-      </aside>
+  function runResultClass(status: string) {
+    if (status === "succeeded") return "txt-ok";
+    if (["failed", "timed_out", "lost"].includes(status)) return "txt-accent";
+    return "";
+  }
 
-      <section className="content-area">
-        <section className="workspace-overview-pane" aria-label="Projekt- und Laufzeitinformationen">
-        <header className="topbar"><div className="breadcrumbs"><span>{activeProject?.name ?? "Projekt"}</span><b>/</b><strong>Board</strong></div><div className="top-actions"><button className="icon-button" aria-label="Suche">⌕</button><button className="icon-button" aria-label="Benachrichtigungen">♧</button><button className="manager-pill" onClick={() => setIsChatOpen(true)} aria-expanded={isChatOpen}><span className="avatar manager">M</span> Mit Mira chatten <span>↗</span></button></div></header>
-        {dbError && <div className="db-banner" role="status">{dbError}</div>}
-        {runtimeCheck && !runtimeCheck.ok && <div className="db-banner" role="alert"><strong>Agent-Laufzeitcheck fehlgeschlagen.</strong> {runtimeCheck.messages.join(" ")} <small>Benutzer: {runtimeCheck.user.username} · CODEX_HOME: {runtimeCheck.codexHome.path} · Schreibrecht: {runtimeCheck.codexHome.directory.writable ? "ja" : "nein"}</small></div>}
-        <div className="page-heading"><div><div className="eyebrow">{activeProject?.type?.toUpperCase() ?? "PROJEKT"} · AKTIVES PROJEKT</div><h1>{activeProject?.name ?? "Projekt"}<span className="accent">.</span></h1><p>{activeProject?.description || "Dein gekapseltes Projektboard mit Mira und deinen Agents."}</p></div><div className="heading-actions"><button className="secondary-button" onClick={() => void analyzeActiveProject()}>Projekt analysieren</button><button className="secondary-button" onClick={() => openProjectForm(activeProject)}>Projekt bearbeiten</button><button className="primary-button" onClick={() => setShowCreate(true)}><span>＋</span> Neues Ticket</button></div></div>
-        <div className="project-overview"><div><span className="eyebrow">WORKSPACE</span><strong>{activeProject?.workspacePath || "Noch kein lokaler Ordner hinterlegt"}</strong></div><div><span className="eyebrow">FORTSCHRITT</span><strong>{activeProject?.progress ?? 0}%</strong><div className="progress-track"><i style={{ width: `${activeProject?.progress ?? 0}%` }} /></div></div><div><span className="eyebrow">LÄUFE</span><strong>{activeProject?.runCount ?? 0}</strong></div><button className="secondary-button danger-button" onClick={() => void archiveActiveProject()}>Archivieren</button></div>
-        <div className="metric-grid"><div className="metric-card"><span className="metric-icon blue">◌</span><div><small>Aktive Tickets</small><strong>{stats.active}</strong><em className="positive">↑ 1 seit gestern</em></div></div><div className="metric-card"><span className="metric-icon amber">◷</span><div><small>In Prüfung</small><strong>{stats.review}</strong><em>Entwickler + QA</em></div></div><div className="metric-card"><span className="metric-icon green">✓</span><div><small>Abgeschlossen</small><strong>{stats.done}</strong><em className="positive">↑ 2 diese Woche</em></div></div><div className="metric-card manager-card"><span className="avatar manager large">M</span><div><small>Manager-Status</small><strong>Alles im Blick</strong><em><i className="online" /> Mira ist bereit</em></div></div></div>
+  function prioClass(priority: string) {
+    return `prio prio--${priority.toLowerCase()}`;
+  }
 
-        <div className="sync-indicator" role="status"><i className="online" /> Live-Sync aktiv{lastSyncedAt ? ` · zuletzt ${lastSyncedAt}` : ""}</div>
-        <div className="request-monitor" aria-label="Agenten-Anfragen"><div><span className="eyebrow">AGENT REQUEST TRACKING</span><strong>{requestSummary.running ? `${requestSummary.running} läuft gerade` : "Keine Anfrage läuft"}</strong></div><div><span>Anfragen</span><b>{requestSummary.count}</b></div><div><span>Tokens</span><b>{requestSummary.tokens.toLocaleString("de-DE")}{requestSummary.tokens ? " ≈" : ""}</b></div><div><span>Gesamtdauer</span><b>{Math.round(requestSummary.durationMs / 1000)}s</b></div>{agentRequests[0] && <small title={agentRequests[0].responsePreview}>{agentRequests[0].role} · {agentRequests[0].provider} · {agentRequests[0].status} · {agentRequests[0].durationMs ? `${Math.round(agentRequests[0].durationMs / 1000)}s` : "läuft"}{agentRequests[0].totalTokens ? ` · ${agentRequests[0].totalTokens} Tokens` : ` · ≈${agentRequests[0].estimatedInputTokens + agentRequests[0].estimatedOutputTokens} Tokens`}</small>}<details className="request-details"><summary>Letzte Anfragen und Antworten</summary>{agentRequests.map((request) => <article key={request.id}><strong>{request.role} · {request.provider} · {request.status}</strong><span>{request.durationMs ? `${Math.round(request.durationMs / 1000)}s` : "noch offen"} · Input ≈{request.estimatedInputTokens} Tokens · Output ≈{request.estimatedOutputTokens} Tokens{request.totalTokens ? ` · Exakt gesamt ${request.totalTokens}` : ""}</span><label>Gesendet<pre>{request.promptPreview}</pre></label><label>Antwort<pre>{request.responsePreview || request.error || "Noch keine Antwort"}</pre></label></article>)}</details></div>
-        {workspaceView === "agents" && <section className="run-transparency-panel" aria-label="Agentenübersicht">
-          <div className="transparency-heading"><div><span className="eyebrow">AGENTENÜBERSICHT</span><h2>Agenten und ihre Läufe</h2></div><small>{agentRuns.length} Run{agentRuns.length === 1 ? "" : "s"} im Projekt</small></div>
-          <div className="agent-overview-grid">{displayedAgents.map((agent) => { const runs = agentRuns.filter((run) => run.agentId === agent.id); return <button type="button" className={`agent-overview-card ${selectedAgent?.id === agent.id ? "selected" : ""}`} key={agent.id} onClick={() => setSelectedAgentId(agent.id)}><strong>{agent.name}</strong><span>{agent.role} · {agent.provider}</span><small>{agent.status === "busy" ? "aktiver Lauf" : agent.status === "online" ? "bereit" : "deaktiviert oder offline"} · {runs.length} Run{runs.length === 1 ? "" : "s"}</small></button>; })}</div>
-          {selectedAgent ? <div className="agent-detail"><div><span className="eyebrow">AGENT-DETAIL</span><h3>{selectedAgent.name}</h3><p>{selectedAgent.role} · {selectedAgent.provider} · Kapazität {selectedAgent.maxConcurrency}</p></div><div className="run-history">{agentRuns.filter((run) => run.agentId === selectedAgent.id).map((run) => <button type="button" className="run-history-row" key={run.runId} onClick={() => setSelectedRunId(run.runId)}><strong>{run.taskId} · Versuch {run.attemptNo}</strong><span>{readableRunStatus(run.status)} · {formatRunDuration(run)}</span><small>{formatTimestamp(run.lastActivityAt ?? run.finishedAt ?? run.startedAt)}</small></button>)}{agentRuns.every((run) => run.agentId !== selectedAgent.id) && <p className="empty-state">Für diesen Agenten existiert im aktuellen Projekt noch keine Run-Historie.</p>}</div></div> : <p className="empty-state">Wähle einen Agenten für seine Run-Historie aus.</p>}
-        </section>}
-        {workspaceView === "activity" && <section className="run-transparency-panel" aria-label="Aktivität">
-          <div className="transparency-heading"><div><span className="eyebrow">AKTIVITÄT</span><h2>Task-Events und Run-Übergänge</h2></div><small>per Polling synchronisiert</small></div>
-          <div className="activity-feed">{taskEvents.map((event) => <article key={event.id}><strong>{event.taskId} · {event.eventType.replaceAll(".", " ")}</strong><span>{event.taskTitle ?? "Ticket"} · {event.actorType}</span><small>{formatTimestamp(event.createdAt)}</small></article>)}{taskEvents.length === 0 && <p className="empty-state">Noch keine Events im aktiven Projekt. Fehlende historische Daten werden nicht als laufend dargestellt.</p>}</div>
-        </section>}
-        </section>
-        <button className={`workspace-pane-resize-handle${isOverviewPanelResizing ? " is-resizing" : ""}`} type="button" onPointerDown={startOverviewPanelResize} aria-label="Höhe des Projekt- und Debugbereichs durch Ziehen ändern" title="Projekt- und Debugbereich größer oder kleiner ziehen"><span aria-hidden="true">⋮</span><small>Infobereich ziehen</small><span aria-hidden="true">⋮</span></button>
-        <section className="board-pane" aria-label="Ticket-Board">
-        <div className="board-toolbar"><div><h2>Ticket-Board</h2><span className="muted">{tasks.length} Tickets · zuletzt aktualisiert {tasks[0]?.updatedAt}</span></div><div className="toolbar-actions"><div className="board-density" role="group" aria-label="Spaltenbreite"><span>Ansicht</span>{(["compact", "standard", "wide"] as const).map((density) => <button type="button" className={boardDensity === density ? "active" : ""} aria-pressed={boardDensity === density} onClick={() => setBoardDensity(density)} key={density}>{density === "compact" ? "Kompakt" : density === "wide" ? "Breit" : "Standard"}</button>)}</div>{selectedTask?.status === "Ready" && !selectedTask.activeRunId && <button className="secondary-button" disabled={Boolean(pendingRunAction)} onClick={() => queueTaskRunAction(selectedTask, "start", "developer")}>▶ Nächstes Ticket starten</button>}<button className="filter-button">☷ Filtern <span>⌄</span></button></div></div>
-        <div className="board-scroll" role="region" aria-label="Ticketspalten scrollen">
-        <div className={`board ${boardDensity}`}>
+  const layout: "detail" | "chat" | "single" = workspaceView !== "board" ? "single" : rightPane === "chat" ? "chat" : "detail";
+
+  const confirmBlock = pendingRunAction ? (
+    <section className="confirm" role="alertdialog" aria-live="assertive" aria-label="Run-Aktion bestätigen">
+      <strong>{pendingRunAction.action === "stop" ? "Abbruch bestätigen" : pendingRunAction.action === "retry" ? "Wiederholung bestätigen" : "Start bestätigen"}</strong>
+      <p>{pendingRunAction.message}</p>
+      <div className="row">
+        <button className="btn btn--outline btn--sm" disabled={runActionSubmitting} onClick={() => void resolvePendingRunAction("declined")}>Abbrechen</button>
+        <button className="btn btn--primary btn--sm" disabled={runActionSubmitting} onClick={() => void resolvePendingRunAction("confirmed")}>{runActionSubmitting ? "Wird geprüft …" : "Bestätigen"}</button>
+      </div>
+    </section>
+  ) : null;
+
+  // -- Board ------------------------------------------------------------------
+  const boardView = (
+    <section className="main" aria-label="Board">
+      <header className="page-head">
+        <div className="grow">
+          <h1 className="serif page-title">{attention.heading}</h1>
+          <p className="page-sub">{attention.sub}</p>
+        </div>
+        <div className="page-actions">
+          <button className="btn btn--outline" onClick={() => void analyzeActiveProject()}>Projekt analysieren</button>
+          <button className="btn btn--outline" onClick={() => openProjectForm(activeProject)}>Projekt bearbeiten</button>
+          <button className="btn btn--primary" onClick={() => setShowCreate(true)}>Neues Ticket</button>
+        </div>
+      </header>
+      {dbError && <div className="banner banner--error" role="status">{dbError}</div>}
+      {runtimeCheck && !runtimeCheck.ok && <div className="banner" role="alert"><strong>Agent-Laufzeitcheck fehlgeschlagen.</strong> {runtimeCheck.messages.join(" ")} <small>Benutzer: {runtimeCheck.user.username} · CODEX_HOME: {runtimeCheck.codexHome.path} · Schreibrecht: {runtimeCheck.codexHome.directory.writable ? "ja" : "nein"}</small></div>}
+      <div className="stat-line">
+        <span><b>{activeProject?.progress ?? 0} %</b> erledigt</span>
+        <span className="bar"><i style={{ width: `${activeProject?.progress ?? 0}%` }} /></span>
+        <span>{activeProject?.runCount ?? 0} Läufe</span>
+        <span>{requestSummary.tokens.toLocaleString("de-DE")} Tokens</span>
+        <span className="stat-sync">{lastSyncedAt ? `Live-Sync ${lastSyncedAt}` : "Live-Sync aktiv"}</span>
+      </div>
+      <div className="board-scroll" role="region" aria-label="Ticketspalten">
+        <div className="board">
           {statuses.map((status) => {
             const columnTasks = tasks.filter((task) => task.status === status);
-            return <section className={`board-column ${status.toLowerCase().replaceAll(" ", "-")}`} key={status}><div className="column-head"><span className="column-title"><i /> {statusLabel(status)}</span><span className="column-count">{columnTasks.length}</span><button aria-label={`${status} Optionen`}>•••</button></div><div className="column-body">{columnTasks.map((task) => <button type="button" className={`task-card ${selectedId === task.id ? "selected" : ""}`} key={task.id} onClick={() => setSelectedId(task.id)}><div className="task-top"><span className="task-id">{task.id}</span><span className="task-sequence" title="Fachliche Reihenfolge">{task.planSequence ? `#${task.planSequence}` : "nicht gesetzt"}</span><span className={`priority ${task.priority.toLowerCase()}`}>{task.priority}</span></div><h3>{task.title}</h3><p>{task.description}</p><div className="task-bottom"><span className={`avatar small ${task.assignee === "Tester" ? "tester" : task.assignee === "Manager" ? "manager" : "developer"}`}>{task.assignee === "Tester" ? "Q" : task.assignee === "Manager" ? "M" : "D"}</span><span className="comment-count">▱ {task.comments.length}</span><span className="task-date">{task.updatedAt}</span></div></button>)}{columnTasks.length === 0 && <div className="empty-column">Keine Tickets</div>}</div><button className="add-card" onClick={() => { setShowCreate(true); }}>＋ Ticket hinzufügen</button></section>;
+            return (
+              <section className="col" key={status}>
+                <div className="col-head"><span className="col-title">{statusLabel(status)}</span><span className="n">{columnTasks.length}</span></div>
+                {columnTasks.map((task) => {
+                  const run = task.activeRunId ? agentRuns.find((entry) => entry.runId === task.activeRunId) : undefined;
+                  const isActive = task.status === "In Progress";
+                  const isDone = task.status === "Done";
+                  return (
+                    <button
+                      type="button"
+                      key={task.id}
+                      className={`card${isActive ? " card--active" : ""}${isDone ? " card--done" : ""}${selectedId === task.id ? " is-selected" : ""}`}
+                      onClick={() => selectCard(task.id)}
+                    >
+                      <div className="card-top"><span className="card-id">{task.id}</span><span className={prioClass(task.priority)}>{task.priority}</span></div>
+                      <h4 className="card-title">{task.title}</h4>
+                      {task.description && !isActive && <p className="card-desc">{task.description}</p>}
+                      {isActive && <div className="card-run"><span className="dot" /> {task.assignee}{run ? ` · ${formatRunDuration(run)}` : ""}</div>}
+                      {isActive && <div className="bar"><i style={{ width: `${run?.progress ?? 40}%` }} /></div>}
+                      <div className="card-foot"><span>{isActive ? `${run?.progress ?? 40} % · ${run?.currentPhase ?? "in Arbeit"}` : task.assignee}</span><span className="date">{task.updatedAt}</span></div>
+                    </button>
+                  );
+                })}
+                {columnTasks.length === 0 && <div className="col-empty">Keine Tickets</div>}
+                <button className="add-card" onClick={() => setShowCreate(true)}>＋ Ticket</button>
+              </section>
+            );
           })}
         </div>
-        </div>
-        </section>
-      </section>
+      </div>
+      <button className="mira-bar" onClick={() => setRightPane("chat")} aria-label="Mit Mira chatten">
+        <span className="nm">Mira</span>
+        <span className="ph">Aufgabe beschreiben — daraus werden Tickets …</span>
+        <span className="kbd">⏎</span>
+      </button>
+    </section>
+  );
 
-      <div className="workflow-strip" role="status"><span>{selectedTask?.activeRunId ? `Lauf aktiv: ${selectedTask.activeRunRole === "tester" ? "Tester" : "Entwickler"}` : selectedTask?.testReport ? `Testergebnis: ${selectedTask.testReport.status === "passed" ? "Bestanden" : "Änderungen erforderlich"}` : "Workflow bereit"}</span>{selectedTask?.activeRunId && <><small>{selectedTask.activeRunId}</small><button className="secondary-button" disabled={Boolean(pendingRunAction)} onClick={() => { const run = agentRuns.find((entry) => entry.runId === selectedTask.activeRunId); if (run) queueStopRunAction(run); }}>■ Lauf abbrechen</button></>}{selectedTask?.status === "Ready" && <button className="secondary-button" disabled={Boolean(pendingRunAction)} onClick={() => queueTaskRunAction(selectedTask, "start", "developer")}>▶ Entwickler starten</button>}{selectedTask?.status === "Review" && <button className="secondary-button" disabled={Boolean(pendingRunAction)} onClick={() => queueTaskRunAction(selectedTask, "start", "tester")}>Tester starten</button>}{!selectedTask?.activeRunId && retryableRun && <button className="secondary-button" disabled={Boolean(pendingRunAction)} onClick={() => queueTaskRunAction(selectedTask!, "retry", retryableRun.role === "tester" ? "tester" : "developer", retryableRun.runId)}>↻ {retryableRun.role === "tester" ? "Tester" : "Entwickler"} wiederholen</button>}</div>
-      {pendingRunAction && <section className="run-action-confirmation" role="alertdialog" aria-live="assertive" aria-label="Run-Aktion bestätigen"><strong>{pendingRunAction.action === "stop" ? "Abbruch bestätigen" : pendingRunAction.action === "retry" ? "Wiederholung bestätigen" : "Start bestätigen"}</strong><p>{pendingRunAction.message}</p><div><button className="secondary-button" disabled={runActionSubmitting} onClick={() => void resolvePendingRunAction("declined")}>Abbrechen</button><button className="primary-button" disabled={runActionSubmitting} onClick={() => void resolvePendingRunAction("confirmed")}>{runActionSubmitting ? "Wird geprüft …" : "Bestätigen"}</button></div></section>}
-      <aside className="detail-panel">
-        {selectedTask && <button className="secondary-button" onClick={() => openTaskEditor(selectedTask)}>Ticket bearbeiten</button>}
-        <div className="detail-header"><div><span className="eyebrow">TICKETDETAILS</span><strong>{selectedTask?.id}</strong></div><button className="close-button" aria-label="Details schließen">×</button></div>
-        {selectedTask && <><div className="detail-title"><span className={`priority ${selectedTask.priority.toLowerCase()}`}>{selectedTask.priority}</span><h2>{selectedTask.title}</h2><p>{selectedTask.description}</p></div>{selectedTask.obsoleteAt && <div className="db-banner" role="status"><strong>Obsolet archiviert.</strong> {selectedTask.obsoleteReason ?? "Dieses Ticket ist revisionssicher aus dem aktiven Workflow entfernt."}</div>}<div className="detail-meta"><div><span>Status</span><select value={selectedTask.status} disabled={Boolean(selectedTask.obsoleteAt)} onChange={(event) => moveTask(selectedTask.id, event.target.value as Status)}>{statuses.map((status) => <option key={status} value={status}>{status}</option>)}</select></div><div><span>Zuständig</span><strong><span className={`avatar small ${selectedTask.assignee === "Tester" ? "tester" : selectedTask.assignee === "Manager" ? "manager" : "developer"}`}>{selectedTask.assignee === "Tester" ? "Q" : selectedTask.assignee === "Manager" ? "M" : "D"}</span>{selectedTask.assignee}</strong></div></div><div className="detail-section"><div className="section-title">Akzeptanzkriterien <span>{selectedTask.acceptance.length}</span></div><ul className="criteria-list">{selectedTask.acceptance.map((criteria, index) => <li key={`${criteria}-${index}`}><span className="check-box">{selectedTask.status === "Done" ? "✓" : ""}</span>{criteria}</li>)}</ul></div><div className="detail-section run-history-section"><div className="section-title">Run-Historie <span>{selectedTaskRuns.length}</span></div>{selectedTaskRuns.map((run) => <button type="button" className={`run-history-row ${selectedRunId === run.runId ? "selected" : ""}`} key={run.runId} onClick={() => setSelectedRunId(run.runId)}><strong>{run.agentName} · {run.role} · Versuch {run.attemptNo}</strong><span>{readableRunStatus(run.status)} · {formatRunDuration(run)}</span><small>Phase: {run.currentPhase ?? "nicht gemeldet"} · Aktivität: {formatTimestamp(run.lastActivityAt)}</small></button>)}{selectedTaskRuns.length === 0 && <p className="empty-state">Für dieses Ticket existiert noch kein Run. Das bedeutet nicht, dass ein Lauf aktiv ist.</p>}</div>{selectedRun && selectedRun.taskId === selectedTask.id && <div className="detail-section run-detail-section"><div className="section-title">Run-Detail <button type="button" className="close-button" onClick={() => setSelectedRunId(null)} aria-label="Run-Detail schließen">×</button></div><dl className="run-data"><div><dt>Zustand</dt><dd>{readableRunStatus(selectedRun.status)}</dd></div><div><dt>Provider / Modell</dt><dd>{selectedRun.provider} / {selectedRun.requests[0]?.model || "nicht gespeichert"}</dd></div><div><dt>PID / Identität</dt><dd>{selectedRun.processId ?? "nicht vorhanden"} / {selectedRun.processIdentity ?? "nicht vorhanden"}</dd></div><div><dt>Lease-Ablauf</dt><dd>{formatTimestamp(selectedRun.lease?.expiresAt)}</dd></div><div><dt>Heartbeat</dt><dd>{formatTimestamp(selectedRun.lastHeartbeatAt)}</dd></div><div><dt>Letzte Aktivität</dt><dd>{formatTimestamp(selectedRun.lastActivityAt)}</dd></div><div><dt>Beendigung</dt><dd>{selectedRun.terminationReason ?? "noch nicht beendet"}</dd></div><div><dt>Exit / Signal</dt><dd>{selectedRun.exitCode ?? "–"} / {selectedRun.signal ?? "–"}</dd></div></dl><p><strong>Zusammenfassung:</strong> {selectedRun.summary || "nicht gespeichert"}</p>{selectedRun.error && <p className="run-error"><strong>Fehler:</strong> {selectedRun.error}</p>}<details><summary>Requests, Ausgabe und Fehler ({selectedRun.requests.length})</summary>{selectedRun.requests.map((request) => <article className="run-request" key={request.id}><strong>{request.status} · {request.provider} · {request.model || "Modell nicht gespeichert"}</strong><p><b>Ausgabe:</b> {request.responsePreview || "keine Ausgabe gespeichert"}</p>{request.error && <p className="run-error"><b>Fehler:</b> {request.error}</p>}</article>)}{selectedRun.requests.length === 0 && <p className="empty-state">Keine Request-Ausgabe gespeichert (historisch unvollständig oder kein CLI-Request).</p>}</details>{selectedRun.testReport && <details><summary>Testergebnis: {selectedRun.testReport.status}</summary><p>{selectedRun.testReport.summary || "keine Zusammenfassung"}</p><ul>{selectedRun.testReport.checks.map((check, index) => <li key={`${check.name}-${index}`}>{check.name ?? "Check"}: {check.status ?? "unbekannt"}{check.details ? ` · ${check.details}` : ""}</li>)}</ul><pre>{selectedRun.testReport.logs || "keine Testlogs gespeichert"}</pre></details>}<details><summary>Verknüpfte Events ({selectedRun.events.length})</summary>{selectedRun.events.map((event) => <p key={event.id}>{formatTimestamp(event.createdAt)} · {event.eventType}</p>)}</details></div>}<div className="detail-section comments-section"><div className="section-title">Aktivität <span>{selectedTask.comments.length}</span></div><div className="comments-list">{selectedTask.comments.map((comment) => <div className="comment" key={comment.id}><span className={`avatar small ${comment.role === "Tester" ? "tester" : comment.role === "Manager" ? "manager" : comment.role === "Entwickler" ? "developer" : "user"}`}>{comment.role === "Tester" ? "Q" : comment.role === "Manager" ? "M" : comment.role === "Entwickler" ? "D" : "F"}</span><div><div className="comment-author"><strong>{comment.author}</strong><span>{comment.createdAt}</span></div><p>{comment.text}</p></div></div>)}</div><form className="comment-form" onSubmit={addComment}><span className="avatar small user">F</span><input name="comment" placeholder="Kommentar hinzufügen …" aria-label="Kommentar hinzufügen" /><button aria-label="Kommentar senden">↑</button></form></div></>}
+  // -- Ticketdetail -----------------------------------------------------------
+  const detailRail = (
+    <aside className="rail rail--detail" aria-label="Ticketdetail">
+      {selectedTask ? (
+        <>
+          <div className="detail-top">
+            <span className="card-id mono">{selectedTask.id}</span>
+            <span className={prioClass(selectedTask.priority)}>{selectedTask.priority}</span>
+            <button className="x" aria-label="Details schließen" onClick={() => setSelectedId("")}>×</button>
+          </div>
+          <h2 className="detail-title">{selectedTask.title}</h2>
+          <p className="detail-desc">{selectedTask.description}</p>
+          {selectedTask.obsoleteAt && <div className="banner" role="status"><strong>Obsolet archiviert.</strong> {selectedTask.obsoleteReason ?? "Dieses Ticket ist revisionssicher aus dem aktiven Workflow entfernt."}</div>}
+          <div className="detail-actions">
+            {selectedTask.activeRunId && <button className="btn btn--primary" disabled={Boolean(pendingRunAction)} onClick={() => { const run = agentRuns.find((entry) => entry.runId === selectedTask.activeRunId); if (run) queueStopRunAction(run); }}>Lauf abbrechen</button>}
+            {!selectedTask.activeRunId && selectedTask.status === "Ready" && <button className="btn btn--dark" disabled={Boolean(pendingRunAction)} onClick={() => queueTaskRunAction(selectedTask, "start", "developer")}>Entwickler starten</button>}
+            {!selectedTask.activeRunId && selectedTask.status === "Review" && <button className="btn btn--dark" disabled={Boolean(pendingRunAction)} onClick={() => queueTaskRunAction(selectedTask, "start", "tester")}>Tester starten</button>}
+            {!selectedTask.activeRunId && retryableRun && <button className="btn btn--outline" disabled={Boolean(pendingRunAction)} onClick={() => queueTaskRunAction(selectedTask, "retry", retryableRun.role === "tester" ? "tester" : "developer", retryableRun.runId)}>{retryableRun.role === "tester" ? "Tester" : "Entwickler"} wiederholen</button>}
+            <button className="btn btn--outline" onClick={() => openTaskEditor(selectedTask)}>Bearbeiten</button>
+          </div>
+          {confirmBlock}
+          <div className="section">
+            <div className="meta-list">
+              <div className="meta-row"><span>Status</span><select value={selectedTask.status} disabled={Boolean(selectedTask.obsoleteAt)} onChange={(event) => moveTask(selectedTask.id, event.target.value as Status)}>{statuses.map((status) => <option key={status} value={status}>{statusLabel(status)}</option>)}</select></div>
+              <div className="meta-row"><span>Zuständig</span><span>{selectedTask.assignee}</span></div>
+              {selectedTask.activeRunId && <div className="meta-row"><span>Lauf</span><span>{selectedTask.activeRunRole === "tester" ? "Tester" : "Entwickler"} · {readableRunStatus(selectedTask.activeRunStatus ?? "running")}</span></div>}
+              {selectedTask.planSequence != null && <div className="meta-row"><span>Reihenfolge</span><span className="mono">#{selectedTask.planSequence}</span></div>}
+            </div>
+          </div>
+          <div className="section">
+            <h3 className="section-title">Akzeptanzkriterien <span className="n">{selectedTask.acceptance.length}</span></h3>
+            <div className="check-list">
+              {selectedTask.acceptance.map((criteria, index) => {
+                const done = selectedTask.status === "Done";
+                return <div className={`check-item${done ? "" : " is-open"}`} key={`${criteria}-${index}`}><span className="mk">{done ? "✓" : "○"}</span><span>{criteria}</span></div>;
+              })}
+              {selectedTask.acceptance.length === 0 && <p className="empty">Noch keine Kriterien hinterlegt.</p>}
+            </div>
+          </div>
+          <div className="section">
+            <h3 className="section-title">Läufe <span className="n">{selectedTaskRuns.length}</span></h3>
+            {selectedTaskRuns.map((run) => (
+              <button type="button" className={`run-line${["failed", "timed_out", "cancelled", "lost"].includes(run.status) ? " is-muted" : ""}`} key={run.runId} onClick={() => openRunDrawer(run.runId)}>
+                <div className="top"><span>{run.agentName} · Versuch {run.attemptNo}</span><span className={`res ${runResultClass(run.status)}`}>{readableRunStatus(run.status)} · {formatRunDuration(run)}</span></div>
+                <small>Phase {run.currentPhase ?? "nicht gemeldet"} · Aktivität {relativeAge(run.lastActivityAt)}</small>
+              </button>
+            ))}
+            {selectedTaskRuns.length === 0 && <p className="empty">Für dieses Ticket existiert noch kein Run. Das bedeutet nicht, dass ein Lauf aktiv ist.</p>}
+          </div>
+          <div className="section">
+            <h3 className="section-title">Aktivität <span className="n">{selectedTask.comments.length}</span></h3>
+            <div className="comments">
+              {selectedTask.comments.map((comment) => (
+                <div className="comment" key={comment.id}>
+                  <div className="comment-head"><strong className={comment.role === "Manager" ? "txt-accent" : undefined}>{comment.author}</strong><span>{comment.createdAt}</span></div>
+                  <p>{comment.text}</p>
+                </div>
+              ))}
+              {selectedTask.comments.length === 0 && <p className="empty">Noch keine Aktivität an diesem Ticket.</p>}
+            </div>
+            <form className="comment-bar" onSubmit={addComment}>
+              <span className="side-avatar">F</span>
+              <input name="comment" placeholder="Kommentar …" aria-label="Kommentar hinzufügen" />
+              <button className="send" aria-label="Kommentar senden">↑</button>
+            </form>
+          </div>
+        </>
+      ) : <p className="empty" style={{ padding: "8px 0" }}>Kein Ticket ausgewählt. Wähle links eine Karte.</p>}
+    </aside>
+  );
+
+  // -- Mira-Chat --------------------------------------------------------------
+  const chatManagerAgent = displayedAgents.find((agent) => agent.role === "manager");
+  const chatRail = (
+    <aside className="rail rail--chat" aria-label="Chat mit Mira">
+      <div className="chat-head">
+        <span className="chat-title serif">Mira</span>
+        <span className="chat-sub">Hauptmanager · {chatManagerAgent ? providerLabel(chatManagerAgent.provider).replace("-Abo", "") : "Codex"}</span>
+        <span className="chat-status">online</span>
+        <button className="x" onClick={() => setRightPane("detail")} aria-label="Chat schließen">×</button>
+      </div>
+      <div className="chat-scroll" ref={chatMessagesRef}>
+        {chat.map((message) => (
+          <div className={`msg${message.sender === "Du" ? " msg--user" : ""}`} key={message.id}>
+            <div className="msg-head"><strong>{message.sender === "Du" ? "Du" : "Mira"}</strong><span>{message.sender === "Du" ? "gerade eben" : "Mira"}</span></div>
+            <p>{message.text}</p>
+          </div>
+        ))}
+        {hasManagerWorkbench && (
+          <>
+            {managerState.analysisSnapshot && (
+              <div className="mira-note">
+                <span className="label">Projektanalyse</span>
+                <p>{managerState.analysisSnapshot.summary}</p>
+                {managerState.analysisSnapshot.snapshot?.git?.branch && <small>Git: {managerState.analysisSnapshot.snapshot.git.branch} · {managerState.analysisSnapshot.snapshot.git.changedFiles ?? 0} Änderungen</small>}
+              </div>
+            )}
+            {managerState.conversation?.status === "needs_input" && (
+              <form className="mira-note" onSubmit={continuePlanning}>
+                <span className="label">Rückfragen</span>
+                {managerState.conversation.questions.filter((question) => !question.answer).map((question) => (
+                  <label className="field" key={question.id}>{question.question}
+                    {question.options.length > 0
+                      ? <select value={questionAnswers[question.id] ?? ""} onChange={(event) => setQuestionAnswers((current) => ({ ...current, [question.id]: event.target.value }))}><option value="">Bitte auswählen</option>{question.options.map((option) => <option value={option} key={option}>{option}</option>)}</select>
+                      : <input value={questionAnswers[question.id] ?? ""} onChange={(event) => setQuestionAnswers((current) => ({ ...current, [question.id]: event.target.value }))} placeholder="Deine Antwort" />}
+                  </label>
+                ))}
+                <button className="btn btn--primary btn--sm" style={{ justifySelf: "start" }}>Planung fortsetzen</button>
+              </form>
+            )}
+            {activeManagerPlan && (
+              <div className="mira-note plan-block">
+                <div className="plan-head"><span className="label">{activeManagerPlan.status === "awaiting_confirmation" ? "Planvorschlag" : "Planfortschritt"}</span><strong>{activeManagerPlan.title}</strong><span className="pct">{activeManagerPlan.progress.percent} %</span></div>
+                <p>{activeManagerPlan.summary}</p>
+                {activeManagerPlan.assumptions.length > 0 && <small>Annahmen: {activeManagerPlan.assumptions.join(" · ")}</small>}
+                {activeManagerPlan.risks.length > 0 && <small className="risk">Risiken: {activeManagerPlan.risks.join(" · ")}</small>}
+                <div className="plan-rows">
+                  {activeManagerPlan.tasks.map((task) => (
+                    <div className="plan-row" key={task.id}>
+                      <span className="seq">#{task.sequence}</span>
+                      <div className="body">
+                        <div className="ti">{task.title}</div>
+                        <div className="mt">{roleDe(task.kind)} · {task.priority}{task.taskId ? ` · ${task.taskId}` : ""}</div>
+                        {activeManagerPlan.status === "awaiting_confirmation" && <div className="edit"><button type="button" onClick={() => void editPlanTask(task)}>Bearbeiten</button><button type="button" onClick={() => void removePlanTask(task.id)}>Entfernen</button></div>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                {activeManagerPlan.status === "awaiting_confirmation" && (
+                  <div className="plan-actions">
+                    <button className="btn btn--primary btn--sm" onClick={() => void confirmManagerPlan()}>{activeManagerPlan.tasks.length} {activeManagerPlan.tasks.length === 1 ? "Ticket" : "Tickets"} anlegen</button>
+                    <button className="btn btn--ghost btn--sm" onClick={() => void discardManagerPlan()}>Verwerfen</button>
+                  </div>
+                )}
+              </div>
+            )}
+            {(managerState.actions?.length ?? 0) > 0 && (
+              <div className="mira-note">
+                <span className="label">Manager-Aktionen</span>
+                {managerState.actions!.slice(0, 4).map((action) => (
+                  <div key={action.id} style={{ display: "grid", gap: "4px" }}>
+                    <small><b>{(action.type ?? "Aktion").replaceAll("_", " ")}</b> · Versuch {action.attemptNo ?? 1} · {action.status ?? "unbekannt"} · Phase {action.phase ?? "—"}</small>
+                    {action.error && <small className="risk">{action.error}</small>}
+                    <div className="plan-actions">
+                      {["queued", "running"].includes(action.status) && <button className="btn btn--ghost btn--sm" onClick={() => void cancelManagerAction(action)}>Abbrechen</button>}
+                      {["failed", "cancelled"].includes(action.status) && <button className="btn btn--outline btn--sm" onClick={() => void retryManagerAction(action)}>Wiederholen</button>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="mira-note">
+              <span className="label">Autoprozess</span>
+              <p>{activeProject?.autoProcessEnabled ? "Wartende Review- oder Ready-Tickets werden nacheinander übernommen." : "Entwickler- und Testerläufe werden nur manuell gestartet."}</p>
+              <button className="btn btn--outline btn--sm" style={{ justifySelf: "start" }} onClick={() => void toggleAutoProcess()}>{activeProject?.autoProcessEnabled ? "Autoprozess deaktivieren" : "Autoprozess aktivieren"}</button>
+            </div>
+          </>
+        )}
+      </div>
+      <div className="chat-chips">
+        <button className="chip" onClick={() => void processChatText("Starte die nächste Aufgabe")}>Nächstes Ticket starten</button>
+        <button className="chip" onClick={() => void processChatText("Analysiere dieses Projekt und erstelle anschließend einen umsetzbaren Plan.")}>Projekt planen</button>
+        <button className="chip" onClick={() => void processChatText("Wie ist der Status?")}>Status</button>
+      </div>
+      <form className="chat-input" onSubmit={handleChat}>
+        <textarea value={chatInput} onChange={(event) => setChatInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={`Aufgabe an Mira über ${activeProject?.name ?? "dieses Projekt"} …`} aria-label="Nachricht an Mira" rows={2} />
+        <button className="send" aria-label="Nachricht senden">↑</button>
+      </form>
+    </aside>
+  );
+
+  // -- Agentenseite -----------------------------------------------------------
+  const agentPage = (() => {
+    if (!agentForPage) return <section className="agent"><p className="empty" style={{ padding: "40px" }}>Kein Agent verfügbar.</p></section>;
+    const agent = agentForPage;
+    const agentRunsForAgent = agentRuns.filter((run) => run.agentId === agent.id).sort((a, b) => Date.parse(b.startedAt ?? b.createdAt) - Date.parse(a.startedAt ?? a.createdAt));
+    const currentRun = agentRunsForAgent.find((run) => activeStatuses.includes(run.status));
+    const pastRuns = agentRunsForAgent.filter((run) => !activeStatuses.includes(run.status));
+    const terminal = agentRunsForAgent.filter((run) => ["succeeded", "failed", "timed_out", "cancelled", "lost"].includes(run.status));
+    const succeeded = terminal.filter((run) => run.status === "succeeded").length;
+    const successRate = terminal.length ? Math.round((succeeded / terminal.length) * 100) : null;
+    const currentTask = currentRun ? tasks.find((task) => task.id === currentRun.taskId) : undefined;
+    const logEvents = currentRun ? taskEvents.filter((event) => event.taskId === currentRun.taskId).slice(-14) : taskEvents.slice(-14);
+    const changedFiles = currentRun ? taskEvents.filter((event) => event.taskId === currentRun.taskId && event.eventType.includes("file")).length : 0;
+    const duty = agentDuty(agent.role);
+    const rights = agentRights(agent.role);
+    const model = selectedRun && selectedRun.agentId === agent.id ? selectedRun.requests[0]?.model : undefined;
+    const queue = (agent.role === "tester" ? tasks.filter((task) => task.status === "Review") : tasks.filter((task) => task.status === "Ready")).slice(0, 3);
+    const description = `${roleLabel(agent.role)} im Projekt ${activeProject?.name ?? "Agent Harness"}. Arbeitet über das ${agent.provider === "claude" ? "Claude-Code" : "OpenAI-Codex"}-Abo${model ? ` mit dem Modell ${model}` : ""}, führt Läufe im Arbeitsverzeichnis aus und ${agent.role === "manager" ? "schlägt bestätigungspflichtige Pläne vor" : "darf Dateien ändern sowie das Testgate starten"}.`;
+
+    const tabItems: Array<{ id: AgentTab; label: string; count?: number }> = [
+      { id: "output", label: "Ausgabe" },
+      { id: "requests", label: "Anfragen", count: agentRequests.length },
+      { id: "events", label: "Ereignisse", count: logEvents.length },
+      { id: "tests", label: "Testchecks", count: currentTask?.testReport?.checks.length ?? 0 },
+    ];
+
+    return (
+      <section className="agent" aria-label={`Agent ${agent.name}`}>
+        <div className="crumbs"><button onClick={() => setWorkspaceView("board")}>Agenten</button><span>/</span><span className="cur">{agent.name}</span></div>
+        <div className="agent-head">
+          <div className="grow">
+            <h1 className="agent-title">{agent.name}</h1>
+            <p className="agent-desc">{description}</p>
+          </div>
+          <div className="agent-actions">
+            {currentRun && <button className="btn btn--primary" disabled={Boolean(pendingRunAction)} onClick={() => queueStopRunAction(currentRun)}>Lauf abbrechen</button>}
+            <button className="btn btn--outline" onClick={() => setWorkspaceView("board")}>Zum Board</button>
+          </div>
+        </div>
+        <div className="agent-status">
+          {currentRun ? <span><span className="live">●</span> arbeitet seit <b>{formatRunDuration(currentRun)}</b></span> : <span>bereit — kein aktiver Lauf</span>}
+          <span>Lease bis <b className="mono">{formatClock(currentRun?.leaseExpiresAt)}</b></span>
+          <span>Heartbeat <b>{currentRun ? relativeAge(currentRun.lastHeartbeatAt) : "—"}</b></span>
+          <span>heute <b>{agentRunsForAgent.length} Läufe</b></span>
+          <span>Erfolgsquote <b>{successRate === null ? "—" : `${successRate} %`}</b></span>
+        </div>
+        {(dbError || (runtimeCheck && !runtimeCheck.ok)) && <div style={{ paddingTop: "12px" }}>{dbError && <div className="banner banner--error">{dbError}</div>}</div>}
+        <div className="agent-body">
+          <div className="agent-main">
+            {confirmBlock}
+            <div className="run-head"><span className="t serif">Aktueller Lauf</span>{currentRun ? <><span className="id">{currentRun.runId} · Versuch {currentRun.attemptNo}</span><span className="pct">{currentRun.progress ?? 0} %</span></> : <span className="pct">kein Lauf aktiv</span>}</div>
+            {currentRun ? (
+              <>
+                <div className="run-ticket"><span className="id">{currentRun.taskId}</span><span className="ti">{currentTask?.title ?? "Ticket"}</span>{currentTask && <span className={prioClass(currentTask.priority)}>{currentTask.priority}</span>}</div>
+                <div className="bar run-bar"><i style={{ width: `${currentRun.progress ?? 0}%` }} /></div>
+                <div className="tabs">
+                  {tabItems.map((tab) => <button key={tab.id} className={`tab${agentTab === tab.id ? " is-active" : ""}`} onClick={() => setAgentTab(tab.id)}>{tab.label}{tab.count != null ? ` · ${tab.count}` : ""}</button>)}
+                  <span className="spacer">Geänderte Dateien · {changedFiles}</span>
+                </div>
+                {agentTab === "output" && (
+                  <div className="log" ref={logRef}>
+                    {logEvents.length === 0 && <div className="log-row empty">Noch keine Ausgabe für diesen Lauf.</div>}
+                    {logEvents.map((event) => <div className="log-row" key={event.id}><span className="ts">{formatClock(event.createdAt)}</span>  {event.eventType}  <span className="hi">{event.taskTitle ?? event.actorType}</span></div>)}
+                    {logEvents.length > 0 && <div className="log-row"><span className="ts">{formatClock(currentRun.lastActivityAt)}</span>  phase  <span className="hi">{currentRun.currentPhase ?? "arbeitet"}</span><span className="cur" /></div>}
+                  </div>
+                )}
+                {agentTab === "requests" && (
+                  <div className="log" style={{ fontFamily: "var(--font-sans)", lineHeight: 1.6 }}>
+                    {agentRequests.length === 0 && <p className="empty">Keine Anfragen im aktuellen Projekt gespeichert.</p>}
+                    {agentRequests.map((request) => <div className="log-row" key={request.id} style={{ paddingBottom: "6px" }}><b>{request.role} · {request.provider} · {request.status}</b> — {request.durationMs ? `${Math.round(request.durationMs / 1000)}s` : "läuft"} · ≈{request.estimatedInputTokens + request.estimatedOutputTokens} Tokens</div>)}
+                  </div>
+                )}
+                {agentTab === "events" && (
+                  <div className="log" style={{ fontFamily: "var(--font-sans)", lineHeight: 1.6 }}>
+                    {logEvents.length === 0 && <p className="empty">Keine Ereignisse gespeichert.</p>}
+                    {logEvents.map((event) => <div className="log-row" key={event.id}>{formatClock(event.createdAt)} · {(event.eventType ?? "").replaceAll(".", " ")}</div>)}
+                  </div>
+                )}
+                {agentTab === "tests" && (
+                  <div className="log" style={{ fontFamily: "var(--font-sans)", lineHeight: 1.6 }}>
+                    {!currentTask?.testReport && <p className="empty">Für dieses Ticket liegt noch kein Testergebnis vor.</p>}
+                    {currentTask?.testReport?.checks.map((check, index) => <div className="log-row" key={`${check.name}-${index}`}>{check.name ?? "Check"}: <span className={check.status === "passed" ? "ok" : ""}>{check.status ?? "unbekannt"}</span>{check.details ? ` · ${check.details}` : ""}</div>)}
+                  </div>
+                )}
+              </>
+            ) : <p className="empty">Dieser Agent führt gerade keinen Lauf aus. Sein Live-Log erscheint hier, sobald ein Ticket übernommen wird.</p>}
+
+            <div className="past">
+              <h3 className="past-title">Frühere Läufe</h3>
+              <div className="past-grid past-head"><span>ZEIT</span><span>TICKET</span><span>ERGEBNIS</span><span>DAUER</span><span>TOKENS</span></div>
+              {pastRuns.map((run) => (
+                <button type="button" className="past-grid past-row" key={run.runId} onClick={() => openRunDrawer(run.runId)}>
+                  <span className="time">{formatClock(run.finishedAt ?? run.startedAt ?? run.createdAt)}</span>
+                  <span className="tk">{run.taskId}</span>
+                  <span className={runResultClass(run.status)}>{readableRunStatus(run.status)}</span>
+                  <span className="val">{formatRunDuration(run)}</span>
+                  <span className="tk">—</span>
+                </button>
+              ))}
+              {pastRuns.length === 0 && <p className="empty">Noch keine früheren Läufe für diesen Agenten.</p>}
+            </div>
+          </div>
+
+          <aside className="agent-side">
+            <div className="section section--first">
+              <div className="meta-list">
+                <div className="meta-row"><span>Rolle</span><span>{roleLabel(agent.role)}</span></div>
+                <div className="meta-row"><span>Provider</span><select value={agent.provider} onChange={(event) => void updateAgentProvider(agent.id, event.target.value as HarnessAgent["provider"])}><option value="codex">Codex-Abo</option><option value="claude">Claude-Abo</option></select></div>
+                <div className="meta-row"><span>Modell</span><span className="mono">{model ?? "laut Lauf"}</span></div>
+                <div className="meta-row"><span>Max. Versuche</span><span>3</span></div>
+                <div className="meta-row"><span>Kapazität</span><span>{agent.maxConcurrency}</span></div>
+                <div className="meta-row"><span>Autoprozess</span><span className={activeProject?.autoProcessEnabled ? "txt-ok" : undefined}>{activeProject?.autoProcessEnabled ? "aktiv" : "pausiert"}</span></div>
+              </div>
+            </div>
+            <div className="section">
+              <h3 className="section-title">Auftrag <span className="file">{duty.file}</span></h3>
+              <p className="agent-brief">{duty.text}</p>
+            </div>
+            <div className="section">
+              <h3 className="section-title">Rechte</h3>
+              <div className="check-list">
+                {rights.map((right, index) => <div className={`check-item${right.granted ? "" : " is-open"}`} key={index}><span className="mk">{right.granted ? "✓" : "○"}</span><span>{right.text}</span></div>)}
+              </div>
+            </div>
+            <div className="section">
+              <h3 className="section-title">Arbeitsverzeichnis</h3>
+              <div className="wd-path">{activeProject?.workspacePath || "Noch kein lokaler Ordner hinterlegt"}</div>
+              <div className="wd-test">Testbefehl <span className="mono">{activeProject?.testCommand || "nicht gesetzt"}</span></div>
+            </div>
+            <div className="section">
+              <h3 className="section-title">Warteschlange</h3>
+              {queue.map((task, index) => <div className="queue-row" key={task.id}><span className="id">{task.id}</span><span className="ti">{task.title}</span><span className="tag">{index === 0 ? "als nächstes" : "danach"}</span></div>)}
+              {queue.length === 0 && <p className="empty">Keine wartenden Tickets für diese Rolle.</p>}
+            </div>
+          </aside>
+        </div>
+      </section>
+    );
+  })();
+
+  // -- Aktivität / Läufe ------------------------------------------------------
+  const activityView = (
+    <section className="main list-view" aria-label="Aktivität">
+      <header className="page-head"><div className="grow"><h1 className="serif page-title">Aktivität</h1><p className="page-sub">Task-Events und Run-Übergänge · per Polling synchronisiert</p></div></header>
+      {dbError && <div className="banner banner--error">{dbError}</div>}
+      <div className="list-scroll">
+        {taskEvents.map((event) => (
+          <div className="feed-row" key={event.id}>
+            <div><strong>{event.taskId} · {(event.eventType ?? "").replaceAll(".", " ")}</strong><div className="sub">{event.taskTitle ?? "Ticket"} · {event.actorType}</div></div>
+            <span className="time">{formatTimestamp(event.createdAt)}</span>
+          </div>
+        ))}
+        {taskEvents.length === 0 && <p className="empty">Noch keine Events im aktiven Projekt. Fehlende historische Daten werden nicht als laufend dargestellt.</p>}
+      </div>
+    </section>
+  );
+
+  const runsView = (
+    <section className="main list-view" aria-label="Läufe">
+      <header className="page-head"><div className="grow"><h1 className="serif page-title">Läufe</h1><p className="page-sub">{agentRuns.length} {agentRuns.length === 1 ? "Run" : "Runs"} im Projekt · klicke eine Zeile für das Detail</p></div></header>
+      {dbError && <div className="banner banner--error">{dbError}</div>}
+      <div className="list-scroll">
+        <div className="past-grid past-head" style={{ gridTemplateColumns: "92px 120px minmax(0,1fr) 130px 92px" }}><span>TICKET</span><span>AGENT</span><span>ERGEBNIS</span><span>AKTIVITÄT</span><span>DAUER</span></div>
+        {agentRuns.map((run) => (
+          <button type="button" className="past-grid past-row" style={{ gridTemplateColumns: "92px 120px minmax(0,1fr) 130px 92px" }} key={run.runId} onClick={() => openRunDrawer(run.runId)}>
+            <span className="tk">{run.taskId}</span>
+            <span className="val">{run.agentName}</span>
+            <span className={runResultClass(run.status)}>{readableRunStatus(run.status)} · Versuch {run.attemptNo}</span>
+            <span className="val">{relativeAge(run.lastActivityAt ?? run.finishedAt ?? run.startedAt)}</span>
+            <span className="val">{formatRunDuration(run)}</span>
+          </button>
+        ))}
+        {agentRuns.length === 0 && <p className="empty">Noch keine Läufe im aktiven Projekt.</p>}
+      </div>
+    </section>
+  );
+
+  return (
+    <main className="shell" data-layout={layout}>
+      <aside className="sidebar">
+        <div className="brand"><span className="name">Froschwerk</span><small>HARNESS</small></div>
+        <nav className="nav" aria-label="Hauptnavigation">
+          <button className={`nav-item${workspaceView === "board" ? " is-active" : ""}`} onClick={() => setWorkspaceView("board")}>Board <span className="n">{tasks.length}</span></button>
+          <button className={`nav-item${workspaceView === "agents" ? " is-active" : ""}`} onClick={() => setWorkspaceView("agents")}>Agenten <span className="n">{displayedAgents.length}</span></button>
+          <button className={`nav-item${workspaceView === "activity" ? " is-active" : ""}`} onClick={() => setWorkspaceView("activity")}>Aktivität</button>
+          <button className={`nav-item${workspaceView === "runs" ? " is-active" : ""}`} onClick={() => setWorkspaceView("runs")}>Läufe <span className="n">{agentRuns.length}</span></button>
+        </nav>
+
+        <div className="side-label">PROJEKTE <button onClick={() => openProjectForm()} aria-label="Neues Projekt anlegen">＋</button></div>
+        {projects.length === 0 && <div className="side-proj is-active">{activeProject?.name ?? "Agent Harness"}</div>}
+        {projects.map((project) => (
+          <button key={project.id} className={`side-proj${project.id === activeProjectId ? " is-active" : ""}`} onClick={() => { if (project.id !== activeProjectId) { setTasks([]); setChat([]); setRuntimeCheck(null); setSelectedId(""); setLastSyncedAt(""); setActiveProjectId(project.id); setWorkspaceView("board"); } }}>{project.name}</button>
+        ))}
+
+        <div className="side-label">AGENTEN</div>
+        <div className="side-agents">
+          {displayedAgents.map((agent) => {
+            const activeRun = agentRuns.find((run) => run.agentId === agent.id && activeStatuses.includes(run.status));
+            const off = agent.status === "offline";
+            const st = activeRun ? { text: activeRun.status === "cancelling" ? "beendet" : activeRun.taskId, cls: "st--run" } : off ? { text: "offline", cls: "st--off" } : { text: "bereit", cls: "st--ok" };
+            return (
+              <button key={agent.id} className={`side-agent${off ? " is-off" : ""}${workspaceView === "agents" && agentForPage?.id === agent.id ? " is-active" : ""}`} onClick={() => openAgent(agent.id)}>
+                <span className="nm">{agent.name}</span><span className={`st ${st.cls}`}>{st.text}</span>
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="side-label">VERBINDUNGEN <button onClick={() => void refreshProviders()} aria-label="Providerstatus aktualisieren">↻</button></div>
+        <div className="side-conns">
+          {(["codex", "claude"] as const).map((id) => {
+            const provider = providers[id];
+            const connected = Boolean(provider?.loggedIn && !provider.apiKeyDetected);
+            const text = connected ? (provider?.subscriptionType || provider?.authMethod || "Verbunden") : provider?.installed ? "Login fehlt" : "prüft …";
+            return <div className="side-conn" key={id}><span className="nm">{provider?.label ?? (id === "codex" ? "OpenAI Codex" : "Claude Code")}</span><span className={`st ${connected ? "st--ok" : provider?.installed ? "st--run" : "st--off"}`}>{text}</span></div>;
+          })}
+        </div>
+
+        <div className="side-user"><span className="side-avatar">F</span><div className="u"><strong>FroschiO</strong><small>Workspace Owner</small></div></div>
       </aside>
 
-      {selectedRunId && selectedRun && <div className="run-detail-drawer-backdrop" role="presentation">
-        <section className="run-detail-drawer" role="dialog" aria-modal="true" aria-label={`Run-Detail ${selectedRun.runId}`}>
-          <header className="run-drawer-header"><div><span className="eyebrow">AGENT RUN · {selectedRun.taskId}</span><h2>{selectedRun.agentName} · {selectedRun.role} · Versuch {selectedRun.attemptNo}</h2><p>{readableRunStatus(selectedRun.status)} · gestartet {formatTimestamp(selectedRun.startedAt ?? selectedRun.createdAt)}</p></div><button type="button" className="close-button" onClick={() => setSelectedRunId(null)} aria-label="Run-Detail schließen">×</button></header>
-          <div className="run-drawer-metrics"><div><span>Zustand</span><strong>{readableRunStatus(selectedRun.status)}</strong></div><div><span>Phase / Fortschritt</span><strong>{selectedRun.currentPhase ?? "nicht gemeldet"}{selectedRun.progress === null || selectedRun.progress === undefined ? "" : ` · ${selectedRun.progress}%`}</strong></div><div><span>Letzte Aktivität</span><strong>{formatTimestamp(selectedRun.lastActivityAt)}</strong></div><div><span>Dauer</span><strong>{formatRunDuration(selectedRun)}</strong></div></div>
-          <div className="run-drawer-content"><div className="run-drawer-main"><section><h3>Ergebnis</h3><p>{selectedRun.summary || "Für diesen Run wurde keine Zusammenfassung gespeichert."}</p>{selectedRun.error && <p className="run-error"><strong>Fehler:</strong> {selectedRun.error}</p>}<dl className="run-drawer-data"><div><dt>Provider / Modell</dt><dd>{selectedRun.provider} / {selectedRun.requests[0]?.model || "nicht gespeichert"}</dd></div><div><dt>Beendigung</dt><dd>{selectedRun.terminationReason ?? "noch nicht beendet"}</dd></div><div><dt>Exit / Signal</dt><dd>{selectedRun.exitCode ?? "–"} / {selectedRun.signal ?? "–"}</dd></div><div><dt>Lease-Ablauf</dt><dd>{formatTimestamp(selectedRun.lease?.expiresAt)}</dd></div><div><dt>Heartbeat</dt><dd>{formatTimestamp(selectedRun.lastHeartbeatAt)}</dd></div><div><dt>PID / Prozessidentität</dt><dd>{selectedRun.processId ?? "nicht vorhanden"} / {selectedRun.processIdentity ?? "nicht vorhanden"}</dd></div></dl></section>
-            <section><h3>Requests und Ausgaben <span>{selectedRun.requests.length}</span></h3>{selectedRun.requests.map((request) => <article className="run-drawer-request" key={request.id}><div><strong>{request.status}</strong><span>{request.provider} · {request.model || "Modell nicht gespeichert"} · {formatTimestamp(request.finishedAt ?? request.lastActivityAt ?? request.startedAt)}</span></div>{request.error && <p className="run-error">{request.error}</p>}<details><summary>Technische Rohdaten anzeigen</summary><pre>{request.responsePreview || "Keine Ausgabe gespeichert."}</pre></details></article>)}{selectedRun.requests.length === 0 && <p className="empty-state">Keine Request-Daten gespeichert.</p>}</section>
-            {selectedRun.testReport && <section><h3>Testergebnis: {selectedRun.testReport.status}</h3><p>{selectedRun.testReport.summary || "Keine Zusammenfassung gespeichert."}</p><ul className="run-checks">{selectedRun.testReport.checks.map((check, index) => <li key={`${check.name}-${index}`}><strong>{check.name ?? "Check"}</strong><span>{check.status ?? "unbekannt"}{check.details ? ` · ${check.details}` : ""}</span></li>)}</ul><details><summary>Testlogs anzeigen</summary><pre>{selectedRun.testReport.logs || "Keine Testlogs gespeichert."}</pre></details></section>}</div>
-            <aside className="run-drawer-events"><h3>Verknüpfte Events <span>{selectedRun.events.length}</span></h3>{selectedRun.events.map((event) => <article key={event.id}><strong>{event.eventType.replaceAll(".", " ")}</strong><span>{formatTimestamp(event.createdAt)}</span></article>)}{selectedRun.events.length === 0 && <p className="empty-state">Keine Events gespeichert.</p>}</aside></div>
-        </section>
-      </div>}
+      {workspaceView === "agents" ? agentPage : workspaceView === "activity" ? activityView : workspaceView === "runs" ? runsView : boardView}
+      {workspaceView === "board" && (rightPane === "chat" ? chatRail : detailRail)}
 
-      {isChatOpen ? <aside className={`chat-panel${isChatResizing ? " is-resizing" : ""}`} aria-label="Chat mit Mira">
-        <button className="chat-resize-handle" type="button" onPointerDown={startChatResize} aria-label="Chatfenster durch Ziehen vergrößern oder verkleinern" title="Zum Ändern der Größe ziehen"><span aria-hidden="true">↖</span></button>
-        <div className="chat-header"><div><div className="chat-title"><span className="avatar manager">M</span><strong>Mira</strong><span className="online-label"><i className="online" /> online</span></div><span className="chat-subtitle">Hauptmanager · {activeProject?.name ?? "Projekt"}</span></div><div className="chat-header-actions"><button className="chat-size-reset" type="button" onClick={resetChatSize} title="Standardgröße wiederherstellen" aria-label="Standardgröße wiederherstellen">↺</button><button className="close-button chat-collapse" type="button" onClick={() => setIsChatOpen(false)} title="Chat einklappen" aria-label="Chat einklappen">×</button></div></div>
-        <div className="chat-messages" ref={chatMessagesRef}>{chat.map((message) => <div className={`chat-message ${message.sender === "Du" ? "from-user" : "from-manager"}`} key={message.id}>{message.sender === "Manager" && <span className="avatar small manager">M</span>}<div><span className="message-label">{message.sender === "Du" ? "Du" : "Mira · gerade eben"}</span><p>{message.text}</p></div></div>)}</div>
-        {hasManagerWorkbench && <><button className={`manager-panel-resize-handle${isManagerPanelResizing ? " is-resizing" : ""}`} type="button" onPointerDown={startManagerPanelResize} aria-label="Höhe des Planbereichs durch Ziehen ändern" title="Planbereich größer oder kleiner ziehen"><span aria-hidden="true">⋮</span><small>Planbereich ziehen</small><span aria-hidden="true">⋮</span></button><div className="manager-workbench">
-          <section className="manager-card auto-process-card"><div><span className="eyebrow">AUTOPROZESS</span><strong>{activeProject?.autoProcessEnabled ? "Automatisch weiterarbeiten" : "Nach jedem Lauf pausieren"}</strong></div><p>{activeProject?.autoProcessEnabled ? "Wartende Review- oder Ready-Tickets werden nacheinander übernommen. Nach erfolgreicher Entwicklung startet der Tester; nach bestandenem Test folgt das nächste Ticket." : "Entwickler- und Testerläufe werden nur manuell gestartet; auch nach einem bestandenen Test bleibt der Workflow stehen."}</p><button className="secondary-button" onClick={() => void toggleAutoProcess()}>Autoprozess {activeProject?.autoProcessEnabled ? "deaktivieren" : "aktivieren und starten"}</button></section>
-          {(managerState.actions?.length ?? 0) > 0 && <section className="manager-card"><div><span className="eyebrow">MANAGER-AKTIONEN</span><strong>Versuche und Auditspur</strong></div>{managerState.actions!.slice(0, 6).map((action) => <article className="run-request" key={action.id}><strong>{action.type.replaceAll("_", " ")} · Versuch {action.attemptNo} · {action.status}</strong><p>Phase: {action.phase}{action.agentRequestId ? " · Request verknüpft" : ""}{action.planId ? " · Plan verknüpft" : ""}</p>{action.error && <p className="run-error">{action.error}</p>}<small>{action.events.map((event) => event.eventType.replace("manager.", "")).join(" · ") || "Noch keine Ereignisse"}</small>{["queued", "running"].includes(action.status) && <button type="button" className="secondary-button" onClick={() => void cancelManagerAction(action)}>Aktion abbrechen</button>}{["failed", "cancelled"].includes(action.status) && <button type="button" className="secondary-button" onClick={() => void retryManagerAction(action)}>Als neuen Versuch wiederholen</button>}</article>)}</section>}
-          {managerState.analysisSnapshot && <section className="manager-card analysis-card"><div><span className="eyebrow">PROJEKTANALYSE</span><strong>{managerState.analysisSnapshot.status === "succeeded" ? "Snapshot bereit" : "Analyse mit Hinweis"}</strong></div><p>{managerState.analysisSnapshot.summary}</p>{managerState.analysisSnapshot.snapshot?.git?.branch && <small>Git: {managerState.analysisSnapshot.snapshot.git.branch} · {managerState.analysisSnapshot.snapshot.git.changedFiles ?? 0} Änderungen</small>}</section>}
-          {managerState.conversation?.status === "needs_input" && <form className="manager-card question-card" onSubmit={continuePlanning}><div><span className="eyebrow">RÜCKFRAGEN</span><strong>Planung benötigt deine Antworten</strong></div>{managerState.conversation.questions.filter((question) => !question.answer).map((question) => <label key={question.id}>{question.question}{question.options.length > 0 ? <select value={questionAnswers[question.id] ?? ""} onChange={(event) => setQuestionAnswers((current) => ({ ...current, [question.id]: event.target.value }))}><option value="">Bitte auswählen</option>{question.options.map((option) => <option value={option} key={option}>{option}</option>)}</select> : <input value={questionAnswers[question.id] ?? ""} onChange={(event) => setQuestionAnswers((current) => ({ ...current, [question.id]: event.target.value }))} placeholder="Deine Antwort" />}</label>)}<button className="primary-button">Planung fortsetzen</button></form>}
-          {activeManagerPlan && <section className="manager-card plan-card"><div className="plan-heading"><div><span className="eyebrow">{activeManagerPlan.status === "awaiting_confirmation" ? "PLANVORSCHAU" : "PLANFORTSCHRITT"}</span><strong>{activeManagerPlan.title}</strong></div><b>{activeManagerPlan.progress.percent}%</b></div><p>{activeManagerPlan.summary}</p>{activeManagerPlan.assumptions.length > 0 && <small>Annahmen: {activeManagerPlan.assumptions.join(" · ")}</small>}{activeManagerPlan.risks.length > 0 && <small className="risk-note">Risiken: {activeManagerPlan.risks.join(" · ")}</small>}<div className="plan-task-list">{activeManagerPlan.tasks.map((task) => <article key={task.id}><div><span className="priority">#{task.sequence} · {task.priority}</span><strong>{task.title}</strong><p>{task.description}</p><small>{task.acceptance.length} Kriterien{task.dependsOnClientIds.length ? ` · abhängig von ${task.dependsOnClientIds.join(", ")}` : ""}{task.taskId ? ` · ${task.taskId}` : ""}</small></div>{activeManagerPlan.status === "awaiting_confirmation" && <span className="plan-task-actions"><button type="button" onClick={() => void editPlanTask(task)}>Bearbeiten</button><button type="button" onClick={() => void removePlanTask(task.id)}>Entfernen</button></span>}</article>)}</div>{activeManagerPlan.status === "awaiting_confirmation" && <div className="plan-actions"><button className="secondary-button" onClick={() => void discardManagerPlan()}>Verwerfen</button><button className="primary-button" onClick={() => void confirmManagerPlan()}>Plan bestätigen</button></div>}</section>}
-        </div></>}
-        <div className="chat-suggestions"><button onClick={() => { void processChatText("Analysiere dieses Projekt und erstelle anschließend einen umsetzbaren Plan."); }}>Projekt planen</button><button onClick={() => { void processChatText("Wie ist der Status?"); }}>Status zusammenfassen</button><button onClick={() => { void processChatText("Starte die nächste Aufgabe"); }}>Nächstes Ticket</button></div>
-        <form className="chat-form" onSubmit={handleChat}><textarea value={chatInput} onChange={(event) => setChatInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={`Nachricht an Mira über ${activeProject?.name ?? "dieses Projekt"} …`} aria-label="Nachricht an Mira" rows={2} /><div className="chat-form-bottom"><span>↗ Enter senden · Shift+Enter Zeilenumbruch</span><button className="send-button" aria-label="Nachricht senden">↑</button></div></form>
-      </aside> : <button className="chat-launcher" type="button" onClick={() => setIsChatOpen(true)} aria-label="Chat mit Mira öffnen"><span className="avatar manager">M</span><span>Mit Mira chatten</span><b>↑</b></button>}
+      {drawerOpen && selectedRun && selectedRun.runId === selectedRunId && (
+        <div className="drawer-back" role="presentation">
+          <section className="drawer" role="dialog" aria-modal="true" aria-label={`Run-Detail ${selectedRun.runId}`}>
+            <header className="drawer-head">
+              <div><span className="label">Agent Run · {selectedRun.taskId}</span><h2>{selectedRun.agentName} · {roleDe(selectedRun.role)} · Versuch {selectedRun.attemptNo}</h2><p>{readableRunStatus(selectedRun.status)} · gestartet {formatTimestamp(selectedRun.startedAt ?? selectedRun.createdAt)}</p></div>
+              <button className="x" onClick={closeRunDrawer} aria-label="Run-Detail schließen">×</button>
+            </header>
+            <div className="drawer-metrics">
+              <div><span>Zustand</span><strong>{readableRunStatus(selectedRun.status)}</strong></div>
+              <div><span>Phase / Fortschritt</span><strong>{selectedRun.currentPhase ?? "nicht gemeldet"}{selectedRun.progress == null ? "" : ` · ${selectedRun.progress} %`}</strong></div>
+              <div><span>Letzte Aktivität</span><strong>{relativeAge(selectedRun.lastActivityAt)}</strong></div>
+              <div><span>Dauer</span><strong>{formatRunDuration(selectedRun)}</strong></div>
+            </div>
+            <div className="drawer-body">
+              <div className="drawer-main">
+                <div>
+                  <h3>Ergebnis</h3>
+                  <p>{selectedRun.summary || "Für diesen Run wurde keine Zusammenfassung gespeichert."}</p>
+                  {selectedRun.error && <p className="run-error">Fehler: {selectedRun.error}</p>}
+                  <dl className="drawer-data">
+                    <div><dt>Provider / Modell</dt><dd>{selectedRun.provider} / {selectedRun.requests[0]?.model || "nicht gespeichert"}</dd></div>
+                    <div><dt>Beendigung</dt><dd>{selectedRun.terminationReason ?? "noch nicht beendet"}</dd></div>
+                    <div><dt>Exit / Signal</dt><dd>{selectedRun.exitCode ?? "–"} / {selectedRun.signal ?? "–"}</dd></div>
+                    <div><dt>Lease-Ablauf</dt><dd>{formatTimestamp(selectedRun.lease?.expiresAt)}</dd></div>
+                    <div><dt>Heartbeat</dt><dd>{formatTimestamp(selectedRun.lastHeartbeatAt)}</dd></div>
+                    <div><dt>PID / Prozessidentität</dt><dd>{selectedRun.processId ?? "nicht vorhanden"} / {selectedRun.processIdentity ?? "nicht vorhanden"}</dd></div>
+                  </dl>
+                </div>
+                <div className="section">
+                  <h3>Requests und Ausgaben <span className="n">{selectedRun.requests.length}</span></h3>
+                  {selectedRun.requests.map((request) => (
+                    <div className="drawer-req" key={request.id}>
+                      <div className="top"><strong>{request.status}</strong><span>{request.provider} · {request.model || "Modell nicht gespeichert"} · {formatTimestamp(request.finishedAt ?? request.lastActivityAt ?? request.startedAt)}</span></div>
+                      {request.error && <p className="run-error">{request.error}</p>}
+                      <details><summary>Technische Rohdaten anzeigen</summary><pre>{request.responsePreview || "Keine Ausgabe gespeichert."}</pre></details>
+                    </div>
+                  ))}
+                  {selectedRun.requests.length === 0 && <p className="empty">Keine Request-Daten gespeichert.</p>}
+                </div>
+                {selectedRun.testReport && (
+                  <div className="section">
+                    <h3>Testergebnis: {selectedRun.testReport.status}</h3>
+                    <p>{selectedRun.testReport.summary || "Keine Zusammenfassung gespeichert."}</p>
+                    <ul className="run-checks">{selectedRun.testReport.checks.map((check, index) => <li key={`${check.name}-${index}`}><strong>{check.name ?? "Check"}</strong><span>{check.status ?? "unbekannt"}{check.details ? ` · ${check.details}` : ""}</span></li>)}</ul>
+                    <details><summary>Testlogs anzeigen</summary><pre>{selectedRun.testReport.logs || "Keine Testlogs gespeichert."}</pre></details>
+                  </div>
+                )}
+              </div>
+              <aside className="drawer-events">
+                <h3>Ereignisse</h3>
+                {selectedRun.events.map((event) => <article key={event.id}><strong>{(event.eventType ?? "").replaceAll(".", " ")}</strong><span>{formatTimestamp(event.createdAt)}</span></article>)}
+                {selectedRun.events.length === 0 && <p className="empty">Keine Events gespeichert.</p>}
+              </aside>
+            </div>
+          </section>
+        </div>
+      )}
 
-      {showCreate && <div className="modal-backdrop"><div className="create-modal"><div className="modal-heading"><div><span className="eyebrow">NEUES TICKET</span><h2>Was soll erledigt werden?</h2></div><button className="close-button" onClick={() => setShowCreate(false)}>×</button></div><label>Titel<input value={newTitle} onChange={(event) => setNewTitle(event.target.value)} placeholder="z. B. Run-Aktion dokumentieren" /></label><label>Beschreibung<textarea value={newDescription} onChange={(event) => setNewDescription(event.target.value)} placeholder="Ziel, Kontext und gewünschtes Ergebnis …" rows={4} /></label><div className="modal-actions"><button className="secondary-button" onClick={() => setShowCreate(false)}>Abbrechen</button><button className="primary-button" onClick={() => createTask()}>Ticket anlegen</button></div></div></div>}
-      {showProjectModal && <div className="modal-backdrop"><form className="create-modal project-modal" onSubmit={saveProject}><div className="modal-heading"><div><span className="eyebrow">{editingProjectId ? "PROJEKT BEARBEITEN" : "NEUES PROJEKT"}</span><h2>{editingProjectId ? "Projekt konfigurieren" : "Was möchtest du entwickeln?"}</h2></div><button type="button" className="close-button" onClick={() => setShowProjectModal(false)}>×</button></div><div className="form-grid"><label>Name<input required value={projectForm.name} onChange={(event) => setProjectForm((current) => ({ ...current, name: event.target.value }))} placeholder="Meine WebApp" /></label><label>Schlüssel<input required value={projectForm.key} onChange={(event) => setProjectForm((current) => ({ ...current, key: event.target.value }))} placeholder="APP" /></label></div><label>Beschreibung<textarea value={projectForm.description} onChange={(event) => setProjectForm((current) => ({ ...current, description: event.target.value }))} rows={2} placeholder="Worum geht es in diesem Projekt?" /></label><label>Projektart<select value={projectForm.type} onChange={(event) => setProjectForm((current) => ({ ...current, type: event.target.value }))}><option>WebApp</option><option>Desktop-App</option><option>Mobile-App</option><option>Tool</option><option>API</option><option>Bibliothek</option><option>Sonstiges</option></select></label><label>Lokaler Workspace / Repository<input value={projectForm.workspacePath} onChange={(event) => setProjectForm((current) => ({ ...current, workspacePath: event.target.value }))} placeholder="C:\Projekte\MeineWebApp" /></label><div className="form-grid"><label>Startbefehl<input value={projectForm.startCommand} onChange={(event) => setProjectForm((current) => ({ ...current, startCommand: event.target.value }))} placeholder="npm run dev" /></label><label>Testbefehl<input value={projectForm.testCommand} onChange={(event) => setProjectForm((current) => ({ ...current, testCommand: event.target.value }))} placeholder="npm test" /></label></div><div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setShowProjectModal(false)}>Abbrechen</button><button className="primary-button">{editingProjectId ? "Änderungen speichern" : "Projekt anlegen"}</button></div></form></div>}
-      {showTaskEditor && <div className="modal-backdrop"><form className="create-modal" onSubmit={saveTask}><div className="modal-heading"><div><span className="eyebrow">TICKET BEARBEITEN</span><h2>{taskForm.id}</h2></div><button type="button" className="close-button" onClick={() => setShowTaskEditor(false)}>×</button></div><label>Titel<input required value={taskForm.title} onChange={(event) => setTaskForm((current) => ({ ...current, title: event.target.value }))} /></label><label>Beschreibung<textarea value={taskForm.description} onChange={(event) => setTaskForm((current) => ({ ...current, description: event.target.value }))} rows={4} /></label><div className="form-grid"><label>Priorität<select value={taskForm.priority} onChange={(event) => setTaskForm((current) => ({ ...current, priority: event.target.value }))}>{["Urgent", "High", "Medium", "Low"].map((priority) => <option key={priority}>{priority}</option>)}</select></label><label>Zuständig<select value={taskForm.assignee} onChange={(event) => setTaskForm((current) => ({ ...current, assignee: event.target.value }))}><option>Manager</option><option>Entwickler</option><option>Tester</option></select></label></div><label>Akzeptanzkriterien <small>Eine Zeile pro Kriterium</small><textarea value={taskForm.acceptance} onChange={(event) => setTaskForm((current) => ({ ...current, acceptance: event.target.value }))} rows={6} /></label><div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setShowTaskEditor(false)}>Abbrechen</button><button className="primary-button">Änderungen speichern</button></div></form></div>}
+      {showCreate && (
+        <div className="modal-back">
+          <div className="modal">
+            <div className="modal-head"><div><span className="label">Neues Ticket</span><h2>Was soll erledigt werden?</h2></div><button className="x" onClick={() => setShowCreate(false)}>×</button></div>
+            <label className="field">Titel<input value={newTitle} onChange={(event) => setNewTitle(event.target.value)} placeholder="z. B. Run-Aktion dokumentieren" /></label>
+            <label className="field">Beschreibung<textarea value={newDescription} onChange={(event) => setNewDescription(event.target.value)} placeholder="Ziel, Kontext und gewünschtes Ergebnis …" rows={4} /></label>
+            <div className="modal-actions"><button className="btn btn--outline" onClick={() => setShowCreate(false)}>Abbrechen</button><button className="btn btn--primary" onClick={() => createTask()}>Ticket anlegen</button></div>
+          </div>
+        </div>
+      )}
+      {showProjectModal && (
+        <div className="modal-back">
+          <form className="modal modal--wide" onSubmit={saveProject}>
+            <div className="modal-head"><div><span className="label">{editingProjectId ? "Projekt bearbeiten" : "Neues Projekt"}</span><h2>{editingProjectId ? "Projekt konfigurieren" : "Was möchtest du entwickeln?"}</h2></div><button type="button" className="x" onClick={() => setShowProjectModal(false)}>×</button></div>
+            <div className="field-grid"><label className="field">Name<input required value={projectForm.name} onChange={(event) => setProjectForm((current) => ({ ...current, name: event.target.value }))} placeholder="Meine WebApp" /></label><label className="field">Schlüssel<input required value={projectForm.key} onChange={(event) => setProjectForm((current) => ({ ...current, key: event.target.value }))} placeholder="APP" /></label></div>
+            <label className="field">Beschreibung<textarea value={projectForm.description} onChange={(event) => setProjectForm((current) => ({ ...current, description: event.target.value }))} rows={2} placeholder="Worum geht es in diesem Projekt?" /></label>
+            <label className="field">Projektart<select value={projectForm.type} onChange={(event) => setProjectForm((current) => ({ ...current, type: event.target.value }))}><option>WebApp</option><option>Desktop-App</option><option>Mobile-App</option><option>Tool</option><option>API</option><option>Bibliothek</option><option>Sonstiges</option></select></label>
+            <label className="field">Lokaler Workspace / Repository<input value={projectForm.workspacePath} onChange={(event) => setProjectForm((current) => ({ ...current, workspacePath: event.target.value }))} placeholder="C:\Projekte\MeineWebApp" /></label>
+            <div className="field-grid"><label className="field">Startbefehl<input value={projectForm.startCommand} onChange={(event) => setProjectForm((current) => ({ ...current, startCommand: event.target.value }))} placeholder="npm run dev" /></label><label className="field">Testbefehl<input value={projectForm.testCommand} onChange={(event) => setProjectForm((current) => ({ ...current, testCommand: event.target.value }))} placeholder="npm test" /></label></div>
+            <div className="modal-actions">{editingProjectId && <button type="button" className="btn btn--ghost" onClick={() => void archiveActiveProject()}>Archivieren</button>}<button type="button" className="btn btn--outline" onClick={() => setShowProjectModal(false)}>Abbrechen</button><button className="btn btn--primary">{editingProjectId ? "Speichern" : "Projekt anlegen"}</button></div>
+          </form>
+        </div>
+      )}
+      {showTaskEditor && (
+        <div className="modal-back">
+          <form className="modal" onSubmit={saveTask}>
+            <div className="modal-head"><div><span className="label">Ticket bearbeiten</span><h2>{taskForm.id}</h2></div><button type="button" className="x" onClick={() => setShowTaskEditor(false)}>×</button></div>
+            <label className="field">Titel<input required value={taskForm.title} onChange={(event) => setTaskForm((current) => ({ ...current, title: event.target.value }))} /></label>
+            <label className="field">Beschreibung<textarea value={taskForm.description} onChange={(event) => setTaskForm((current) => ({ ...current, description: event.target.value }))} rows={4} /></label>
+            <div className="field-grid"><label className="field">Priorität<select value={taskForm.priority} onChange={(event) => setTaskForm((current) => ({ ...current, priority: event.target.value }))}>{["Urgent", "High", "Medium", "Low"].map((priority) => <option key={priority}>{priority}</option>)}</select></label><label className="field">Zuständig<select value={taskForm.assignee} onChange={(event) => setTaskForm((current) => ({ ...current, assignee: event.target.value }))}><option>Manager</option><option>Entwickler</option><option>Tester</option></select></label></div>
+            <label className="field">Akzeptanzkriterien <small>Eine Zeile pro Kriterium</small><textarea value={taskForm.acceptance} onChange={(event) => setTaskForm((current) => ({ ...current, acceptance: event.target.value }))} rows={6} /></label>
+            <div className="modal-actions"><button type="button" className="btn btn--outline" onClick={() => setShowTaskEditor(false)}>Abbrechen</button><button className="btn btn--primary">Änderungen speichern</button></div>
+          </form>
+        </div>
+      )}
     </main>
   );
 }

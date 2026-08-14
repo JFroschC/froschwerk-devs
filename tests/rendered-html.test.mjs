@@ -21,10 +21,10 @@ test("server-renders the taskboard shell", async () => {
 
   const html = await response.text();
   assert.match(html, /Froschwerk/);
-  assert.match(html, /Ticket-Board/);
-  assert.match(html, /AGENTENSTATUS/);
-  assert.match(html, /Codex-Abo/);
-  assert.match(html, /Claude-Abo/);
+  assert.match(html, /Board/);
+  assert.match(html, /AGENTEN/);
+  assert.match(html, /OpenAI Codex/);
+  assert.match(html, /Claude Code/);
   assert.match(html, /Mira/);
 });
 
@@ -40,7 +40,7 @@ test("contains the provider assignment workflow", async () => {
     readFile(new URL("../scripts/manager-actions.mjs", import.meta.url), "utf8"),
   ]);
 
-  assert.match(page, /agent-provider-select/);
+  assert.match(page, /updateAgentProvider/);
   assert.match(page, /\/api\/agents/);
   assert.match(api, /\/api\/chat\/manager/);
   assert.match(page, /requestSubmit\(\)/);
