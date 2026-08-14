@@ -26,7 +26,7 @@ test("Changes Requested tickets are claimed atomically", () => {
     assert.ok(claimed.runId);
     assert.equal(claimed.task.status, "In Progress");
     assert.equal(claimed.task.activeRunId, claimed.runId);
-    assert.equal(db.getAgentRun(claimed.runId).status, "running");
+    assert.equal(db.getAgentRun(claimed.runId).status, "queued");
     console.log("ok");
   `), "ok");
 });
@@ -39,6 +39,7 @@ test("developer failures retry only to the configured boundary", () => {
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       const claimed = db.claimNextTask("agent-developer-1", task.id, "project-agent-harness");
       assert.ok(claimed.runId);
+      db.markAgentRunRunning(claimed.runId);
       const finished = db.finishAgentRun(claimed.runId, { status: "failed", error: "CLI_FAILURE", nextStatus: "Ready" });
       assert.equal(finished.retryCount, attempt);
       assert.equal(finished.status, attempt === 3 ? "Blocked" : "Ready");
@@ -53,7 +54,7 @@ test("developer failures retry only to the configured boundary", () => {
   `), "ok");
 });
 
-test("lease heartbeats preserve live work and expired developer runs recover", () => {
+test("lease expiry is supervised before a developer ticket is released", () => {
   assert.equal(run(`
     import assert from "node:assert/strict";
     import { DatabaseSync } from "node:sqlite";
@@ -68,11 +69,20 @@ test("lease heartbeats preserve live work and expired developer runs recover", (
     const rawAgain = new DatabaseSync(process.env.HARNESS_DB_PATH);
     rawAgain.prepare("UPDATE agent_leases SET expires_at = ? WHERE run_id = ?").run(new Date(Date.now() - 5000).toISOString(), live.runId);
     rawAgain.close();
+    const workflow = await import(${JSON.stringify(workflowModule)});
+    // First pass marks the stale run cancelling. A second pass observes that
+    // there is no process identity/PID to protect and only then releases it.
+    assert.equal(workflow.sweepAgentLifecycle().find((entry) => entry.runId === live.runId).action, "cancelling");
+    const cancelling = db.listTasks().find((entry) => entry.id === task.id);
+    assert.equal(cancelling.status, "In Progress");
+    assert.equal(cancelling.activeRunId, live.runId);
+    assert.equal(db.claimNextTask("agent-developer-1", task.id, "project-agent-harness").reason, "task_not_ready");
+    workflow.sweepAgentLifecycle();
     const recovered = db.listTasks().find((entry) => entry.id === task.id);
     assert.equal(recovered.status, "Ready");
     assert.equal(recovered.activeRunId, null);
     assert.equal(recovered.retryCount, 1);
-    assert.equal(db.getAgentRun(live.runId).status, "failed");
+    assert.equal(db.getAgentRun(live.runId).status, "lost");
     console.log("ok");
   `), "ok");
 });
@@ -118,6 +128,7 @@ test("repeated tester failures stop creating nested follow-up tickets", () => {
       if (failure > 1) {
         const developer = db.claimNextTask("agent-developer-1", taskId, "project-agent-harness");
         assert.ok(developer.runId);
+        db.markAgentRunRunning(developer.runId);
         db.finishAgentRun(developer.runId, { status: "succeeded" });
       }
       const tester = db.startTesterRun(taskId, "agent-tester-1", "project-agent-harness");

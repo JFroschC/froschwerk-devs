@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
+import { agentRuntimeStatus, assertAgentRunTransition } from "./agent-lifecycle.ts";
 
 // node:sqlite returns dynamically shaped result rows. Keep that boundary local
 // to this module; the public mapping functions below expose stable objects.
@@ -39,6 +40,7 @@ CREATE TABLE IF NOT EXISTS agents (
   role TEXT NOT NULL,
   provider TEXT NOT NULL DEFAULT 'codex',
   status TEXT NOT NULL DEFAULT 'offline',
+  enabled INTEGER NOT NULL DEFAULT 1,
   max_concurrency INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -97,6 +99,15 @@ CREATE TABLE IF NOT EXISTS agent_runs (
   summary TEXT NOT NULL DEFAULT '',
   error TEXT,
   process_id INTEGER,
+  process_identity TEXT,
+  last_heartbeat_at TEXT,
+  last_activity_at TEXT,
+  current_phase TEXT,
+  progress INTEGER,
+  exit_code INTEGER,
+  signal TEXT,
+  termination_reason TEXT,
+  cancellation_requested_at TEXT,
   started_at TEXT,
   finished_at TEXT,
   created_at TEXT NOT NULL
@@ -121,6 +132,8 @@ CREATE TABLE IF NOT EXISTS agent_requests (
   command TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'running',
   started_at TEXT NOT NULL,
+  last_activity_at TEXT,
+  current_phase TEXT,
   finished_at TEXT,
   duration_ms INTEGER,
   input_chars INTEGER NOT NULL DEFAULT 0,
@@ -287,13 +300,20 @@ export function startAgentRequest(input: { projectId?: string; taskId?: string; 
   const db = getDatabase();
   const requestId = id("request");
   const startedAt = timestamp();
-  db.prepare(`INSERT INTO agent_requests (id, project_id, task_id, run_id, agent_id, role, provider, model, command, status, started_at, input_chars, estimated_input_tokens, prompt_hash, prompt_preview)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?)`).run(
+  db.prepare(`INSERT INTO agent_requests (id, project_id, task_id, run_id, agent_id, role, provider, model, command, status, started_at, last_activity_at, current_phase, input_chars, estimated_input_tokens, prompt_hash, prompt_preview)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, 'starting', ?, ?, ?, ?)`).run(
     requestId, input.projectId ?? null, input.taskId ?? null, input.runId ?? null, input.agentId ?? null,
-    input.role, input.provider, input.model ?? "", input.command ?? "", startedAt, input.prompt.length,
+    input.role, input.provider, input.model ?? "", input.command ?? "", startedAt, startedAt, input.prompt.length,
     tokenEstimate(input.prompt), createHash("sha256").update(input.prompt).digest("hex"), preview(input.prompt),
   );
   return { requestId, startedAt };
+}
+
+export function reportAgentRequestActivity(requestId: string, phase = "running") {
+  const db = getDatabase();
+  const now = timestamp();
+  db.prepare("UPDATE agent_requests SET last_activity_at = ?, current_phase = ? WHERE id = ? AND status = 'running'").run(now, phase, requestId);
+  return now;
 }
 
 export function finishAgentRequest(requestId: string, input: { status: string; response?: string; error?: string; inputTokens?: number; outputTokens?: number; totalTokens?: number; startedAt?: string }) {
@@ -310,7 +330,7 @@ export function finishAgentRequest(requestId: string, input: { status: string; r
 
 export function listAgentRequests(projectId?: string, limit = 25) {
   const db = getDatabase();
-  return db.prepare(`SELECT id, project_id AS projectId, task_id AS taskId, run_id AS runId, agent_id AS agentId, role, provider, model, command, status, started_at AS startedAt, finished_at AS finishedAt, duration_ms AS durationMs, input_chars AS inputChars, output_chars AS outputChars, estimated_input_tokens AS estimatedInputTokens, estimated_output_tokens AS estimatedOutputTokens, input_tokens AS inputTokens, output_tokens AS outputTokens, total_tokens AS totalTokens, prompt_hash AS promptHash, prompt_preview AS promptPreview, response_preview AS responsePreview, error FROM agent_requests WHERE (? IS NULL OR project_id = ?) ORDER BY started_at DESC, id DESC LIMIT ?`).all(projectId ?? null, projectId ?? null, Math.max(1, Math.min(limit, 100))) as Row[];
+  return db.prepare(`SELECT id, project_id AS projectId, task_id AS taskId, run_id AS runId, agent_id AS agentId, role, provider, model, command, status, started_at AS startedAt, last_activity_at AS lastActivityAt, current_phase AS currentPhase, finished_at AS finishedAt, duration_ms AS durationMs, input_chars AS inputChars, output_chars AS outputChars, estimated_input_tokens AS estimatedInputTokens, estimated_output_tokens AS estimatedOutputTokens, input_tokens AS inputTokens, output_tokens AS outputTokens, total_tokens AS totalTokens, prompt_hash AS promptHash, prompt_preview AS promptPreview, response_preview AS responsePreview, error FROM agent_requests WHERE (? IS NULL OR project_id = ?) ORDER BY started_at DESC, id DESC LIMIT ?`).all(projectId ?? null, projectId ?? null, Math.max(1, Math.min(limit, 100))) as Row[];
 }
 
 export function agentRequestSummary(projectId?: string) {
@@ -330,6 +350,7 @@ function getDatabase() {
       migrateAgents(openedDatabase);
       migrateTasks(openedDatabase);
       migrateManagerOrchestration(openedDatabase);
+      migrateAgentLifecycle(openedDatabase);
       seedDatabase(openedDatabase);
       ensureDefaultAgents(openedDatabase);
       recoverStaleAgentRequests(openedDatabase);
@@ -361,15 +382,22 @@ function testerRecoveryLimit() {
 }
 
 function recoverStaleAgentRuns(db: DatabaseSync) {
+  // A database-only recovery is unsafe: a lease can expire while its process
+  // still writes. The lifecycle supervisor owns stop/verification and calls
+  // the terminal functions below only after the process is gone.
+  // Keep this compatibility hook intentionally inert for old call sites.
+  void db;
+  return;
+  /* c8 ignore start -- retained below as migration-era reference */
   const now = timestamp();
   const staleRuns = db.prepare(`
-    SELECT runs.id, runs.task_id AS taskId, runs.role, runs.attempt_no AS attemptNo,
+    SELECT runs.id, runs.task_id AS taskId, runs.role, runs.status, runs.attempt_no AS attemptNo,
       tasks.retry_count AS retryCount, tasks.max_retries AS maxRetries
     FROM agent_runs AS runs
     LEFT JOIN agent_leases AS leases ON leases.run_id = runs.id
     JOIN tasks ON tasks.id = runs.task_id
     WHERE runs.role IN ('developer', 'tester')
-      AND runs.status IN ('queued', 'running')
+      AND runs.status IN ('queued', 'starting', 'running', 'cancelling')
       AND (leases.run_id IS NULL OR leases.expires_at < ?)
   `).all(now) as Row[];
   if (!staleRuns.length) return;
@@ -379,25 +407,27 @@ function recoverStaleAgentRuns(db: DatabaseSync) {
     for (const run of staleRuns) {
       let reason;
       if (run.role === "tester") {
+        assertAgentRunTransition(run.status ?? "running", "lost");
         const exhausted = Number(run.attemptNo) >= testerRecoveryLimit();
         const nextStatus = exhausted ? "Blocked" : "Review";
         reason = exhausted
           ? "Testerprozess ist wiederholt ohne Ergebnis abgebrochen. Der Autoprozess wurde für dieses Ticket angehalten."
           : "Tester-Lauf wurde nach Prozessabbruch oder abgelaufener Lease automatisch freigegeben.";
         const reportId = id("report");
-        db.prepare("UPDATE agent_runs SET status = 'blocked', summary = ?, error = ?, process_id = NULL, finished_at = ? WHERE id = ? AND status IN ('queued', 'running')").run(reason, reason, now, run.id);
+        db.prepare("UPDATE agent_runs SET status = 'lost', summary = ?, error = ?, termination_reason = 'lease_expired', process_id = NULL, finished_at = ? WHERE id = ? AND status IN ('queued', 'starting', 'running', 'cancelling')").run(reason, reason, now, run.id);
         db.prepare("INSERT INTO test_reports (id, task_id, agent_run_id, status, summary, checks_json, logs, created_at) VALUES (?, ?, ?, 'blocked', ?, '[]', '', ?)").run(reportId, run.taskId, run.id, reason, now);
         db.prepare("UPDATE tasks SET status = ?, active_run_id = NULL, assignee_agent_id = NULL, updated_at = ? WHERE id = ? AND active_run_id = ?").run(nextStatus, now, run.taskId, run.id);
         addCommentInternal(db, String(run.taskId), "tester", "agent-tester-1", "QA Bot", `${reason}${exhausted ? "" : " Ein Neustart ist möglich."}`, now);
         addEventInternal(db, String(run.taskId), "tester.run_recovered", "manager", "agent-manager", { runId: run.id, reportId, reason, nextStatus, exhausted }, now);
       } else {
+        assertAgentRunTransition(run.status ?? "running", "lost");
         const retryCount = Number(run.retryCount ?? 0) + 1;
         const exhausted = retryCount >= Number(run.maxRetries ?? 3);
         const nextStatus = exhausted ? "Blocked" : "Ready";
         reason = exhausted
           ? "Entwicklerprozess ist wiederholt ohne Abschluss abgebrochen. Das Ticket wurde nach Erreichen der Retry-Grenze blockiert."
           : "Entwicklerprozess wurde nach Prozessabbruch oder abgelaufener Lease automatisch freigegeben.";
-        db.prepare("UPDATE agent_runs SET status = 'failed', summary = ?, error = ?, process_id = NULL, finished_at = ? WHERE id = ? AND status IN ('queued', 'running')").run(reason, "STALE_RUN_RECOVERED", now, run.id);
+        db.prepare("UPDATE agent_runs SET status = 'lost', summary = ?, error = ?, termination_reason = 'lease_expired', process_id = NULL, finished_at = ? WHERE id = ? AND status IN ('queued', 'starting', 'running', 'cancelling')").run(reason, "STALE_RUN_RECOVERED", now, run.id);
         db.prepare("UPDATE tasks SET status = ?, retry_count = ?, active_run_id = NULL, assignee_agent_id = NULL, updated_at = ? WHERE id = ? AND active_run_id = ?").run(nextStatus, retryCount, now, run.taskId, run.id);
         addCommentInternal(db, String(run.taskId), "manager", "agent-manager", "Mira", reason, now);
         addEventInternal(db, String(run.taskId), "developer.run_recovered", "manager", "agent-manager", { runId: run.id, reason, nextStatus, retryCount, exhausted }, now);
@@ -410,6 +440,7 @@ function recoverStaleAgentRuns(db: DatabaseSync) {
     db.exec("ROLLBACK");
     throw error;
   }
+  /* c8 ignore stop */
 }
 
 function migrateProjects(db: DatabaseSync) {
@@ -421,6 +452,7 @@ function migrateProjects(db: DatabaseSync) {
     db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_key_unique ON projects(key)");
   }
   const additions = [
+    ["process_identity", "TEXT"],
     ["type", "TEXT NOT NULL DEFAULT 'Tool'"],
     ["workspace_path", "TEXT NOT NULL DEFAULT ''"],
     ["start_command", "TEXT NOT NULL DEFAULT ''"],
@@ -496,13 +528,42 @@ function migrateAgents(db: DatabaseSync) {
     // Once a provider was stored, it is a user setting and must survive restarts.
     db.prepare("UPDATE agents SET provider = 'claude' WHERE id = 'agent-developer-2'").run();
   }
+  if (!columns.some((column) => column.name === "enabled")) {
+    db.exec("ALTER TABLE agents ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1");
+    db.prepare("UPDATE agents SET enabled = CASE WHEN status = 'offline' THEN 0 ELSE 1 END").run();
+  }
   db.prepare("UPDATE agents SET provider = 'codex' WHERE provider IS NULL OR TRIM(provider) = ''").run();
+}
+
+function migrateAgentLifecycle(db: DatabaseSync) {
+  const columns = db.prepare("PRAGMA table_info(agent_runs)").all() as Row[];
+  const additions = [
+    ["last_heartbeat_at", "TEXT"],
+    ["last_activity_at", "TEXT"],
+    ["current_phase", "TEXT"],
+    ["progress", "INTEGER"],
+    ["exit_code", "INTEGER"],
+    ["signal", "TEXT"],
+    ["termination_reason", "TEXT"],
+    ["cancellation_requested_at", "TEXT"],
+  ];
+  for (const [name, definition] of additions) {
+    if (!columns.some((column) => column.name === name)) db.exec(`ALTER TABLE agent_runs ADD COLUMN ${name} ${definition}`);
+  }
+  // `blocked` was a historical tester-run state. The ticket remains Blocked
+  // where applicable; the run itself now records the technical outcome only.
+  db.prepare("UPDATE agent_runs SET status = 'failed', termination_reason = COALESCE(termination_reason, 'legacy_blocked_run') WHERE status = 'blocked'").run();
+  db.exec("CREATE INDEX IF NOT EXISTS idx_agent_runs_status_heartbeat ON agent_runs(status, last_heartbeat_at)");
+  const requestColumns = db.prepare("PRAGMA table_info(agent_requests)").all() as Row[];
+  if (!requestColumns.some((column) => column.name === "last_activity_at")) db.exec("ALTER TABLE agent_requests ADD COLUMN last_activity_at TEXT");
+  if (!requestColumns.some((column) => column.name === "current_phase")) db.exec("ALTER TABLE agent_requests ADD COLUMN current_phase TEXT");
+  db.prepare("UPDATE agent_requests SET last_activity_at = COALESCE(last_activity_at, started_at), current_phase = COALESCE(current_phase, CASE WHEN status = 'running' THEN 'running' ELSE 'finished' END)").run();
 }
 
 function ensureDefaultAgents(db: DatabaseSync) {
   const now = timestamp();
-  const insert = db.prepare("INSERT OR IGNORE INTO agents (id, name, role, provider, status, max_concurrency, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
-  insert.run("agent-developer-2", "Dev Agent 2", "developer", "claude", "offline", 1, now, now);
+  const insert = db.prepare("INSERT OR IGNORE INTO agents (id, name, role, provider, status, enabled, max_concurrency, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+  insert.run("agent-developer-2", "Dev Agent 2", "developer", "claude", "offline", 0, 1, now, now);
 }
 
 function seedDatabase(db: DatabaseSync) {
@@ -601,12 +662,19 @@ function formatRelative(value: string, _timestamp = Date.parse(value)) {
 }
 
 function mapAgent(row: Row) {
+  const enabled = Boolean(row.enabled);
+  const runtimeStatus = agentRuntimeStatus(enabled, String(row.activeStatuses ?? "").split(",").filter(Boolean));
   return {
     id: row.id,
     name: row.name,
     role: row.role,
     provider: row.provider,
-    status: row.status,
+    // Retain `status` as a runtime-facing compatibility field for the current
+    // board. Configuration is exposed separately and never derived from it.
+    status: runtimeStatus,
+    configuredStatus: enabled ? "enabled" : "disabled",
+    runtimeStatus,
+    enabled,
     maxConcurrency: row.maxConcurrency,
   };
 }
@@ -673,7 +741,7 @@ export function updateProject(projectId: string, patch: { key?: string; name?: s
 export function archiveProject(projectId: string) {
   const db = getDatabase();
   if (!getProject(projectId)) return undefined;
-  const activeRuns = db.prepare("SELECT COUNT(*) AS count FROM agent_runs JOIN tasks ON tasks.id = agent_runs.task_id WHERE tasks.project_id = ? AND agent_runs.status IN ('queued', 'running')").get(projectId) as { count: number };
+  const activeRuns = db.prepare("SELECT COUNT(*) AS count FROM agent_runs JOIN tasks ON tasks.id = agent_runs.task_id WHERE tasks.project_id = ? AND agent_runs.status IN ('queued', 'starting', 'running', 'cancelling')").get(projectId) as { count: number };
   if (Number(activeRuns.count) > 0) throw new Error("Ein Projekt mit aktiven Agentenläufen kann nicht archiviert werden");
   db.prepare("UPDATE projects SET status = 'archived', updated_at = ? WHERE id = ?").run(timestamp(), projectId);
   return getProject(projectId);
@@ -681,22 +749,29 @@ export function archiveProject(projectId: string) {
 
 export function listAgents() {
   const db = getDatabase();
-  return (db.prepare("SELECT id, name, role, provider, status, max_concurrency AS maxConcurrency FROM agents ORDER BY CASE role WHEN 'manager' THEN 0 WHEN 'developer' THEN 1 ELSE 2 END, id").all() as Row[]).map(mapAgent);
+  return (db.prepare(`SELECT agents.id, agents.name, agents.role, agents.provider, agents.status, agents.enabled,
+    agents.max_concurrency AS maxConcurrency,
+    (SELECT GROUP_CONCAT(status) FROM agent_runs WHERE agent_runs.agent_id = agents.id AND status IN ('queued', 'starting', 'running', 'cancelling')) AS activeStatuses
+    FROM agents ORDER BY CASE role WHEN 'manager' THEN 0 WHEN 'developer' THEN 1 ELSE 2 END, id`).all() as Row[]).map(mapAgent);
 }
 
 export function getAgent(agentId: string) {
   const db = getDatabase();
-  const row = db.prepare("SELECT id, name, role, provider, status, max_concurrency AS maxConcurrency FROM agents WHERE id = ?").get(agentId) as Row | undefined;
+  const row = db.prepare(`SELECT agents.id, agents.name, agents.role, agents.provider, agents.status, agents.enabled,
+    agents.max_concurrency AS maxConcurrency,
+    (SELECT GROUP_CONCAT(status) FROM agent_runs WHERE agent_runs.agent_id = agents.id AND status IN ('queued', 'starting', 'running', 'cancelling')) AS activeStatuses
+    FROM agents WHERE agents.id = ?`).get(agentId) as Row | undefined;
   return row ? mapAgent(row) : undefined;
 }
 
-export function updateAgent(agentId: string, patch: { provider?: string; status?: string; maxConcurrency?: number }) {
+export function updateAgent(agentId: string, patch: { provider?: string; status?: string; enabled?: boolean; maxConcurrency?: number }) {
   const provider = patch.provider === undefined ? undefined : patch.provider.toLowerCase();
   if (provider !== undefined && provider !== "codex" && provider !== "claude") throw new Error("Provider muss codex oder claude sein");
   const db = getDatabase();
   if (!getAgent(agentId)) return undefined;
   const now = timestamp();
-  db.prepare("UPDATE agents SET provider = COALESCE(?, provider), status = COALESCE(?, status), max_concurrency = COALESCE(?, max_concurrency), updated_at = ? WHERE id = ?").run(provider ?? null, patch.status ?? null, patch.maxConcurrency ?? null, now, agentId);
+  const enabled = patch.enabled ?? (patch.status === undefined ? undefined : patch.status !== "offline");
+  db.prepare("UPDATE agents SET provider = COALESCE(?, provider), status = COALESCE(?, status), enabled = COALESCE(?, enabled), max_concurrency = COALESCE(?, max_concurrency), updated_at = ? WHERE id = ?").run(provider ?? null, patch.status ?? null, enabled === undefined ? null : enabled ? 1 : 0, patch.maxConcurrency ?? null, now, agentId);
   return getAgent(agentId);
 }
 
@@ -828,11 +903,10 @@ export function transitionTaskStatus(taskId: string, input: { status: string; ac
 
 export function claimNextTask(agentId = "agent-developer-1", requestedTaskId?: string, projectId?: string) {
   const db = getDatabase();
-  recoverStaleAgentRuns(db);
   const now = timestamp();
   db.exec("BEGIN IMMEDIATE");
   try {
-    const activeDeveloperRuns = db.prepare("SELECT COUNT(*) AS count FROM agent_runs WHERE agent_id = ? AND status IN ('queued', 'running')").get(agentId) as { count: number };
+    const activeDeveloperRuns = db.prepare("SELECT COUNT(*) AS count FROM agent_runs WHERE agent_id = ? AND status IN ('queued', 'starting', 'running', 'cancelling')").get(agentId) as { count: number };
     const agent = db.prepare("SELECT max_concurrency FROM agents WHERE id = ? AND role = 'developer'").get(agentId) as { max_concurrency: number } | undefined;
     if (!agent) { db.exec("COMMIT"); return { task: undefined, reason: "unknown_agent" }; }
     if (Number(activeDeveloperRuns.count) >= Number(agent.max_concurrency)) { db.exec("COMMIT"); return { task: undefined, reason: "developer_capacity" }; }
@@ -852,7 +926,7 @@ export function claimNextTask(agentId = "agent-developer-1", requestedTaskId?: s
     const attemptNo = Number(previousAttempt.attemptNo ?? 0) + 1;
     const claimed = db.prepare("UPDATE tasks SET status = 'In Progress', assignee_agent_id = ?, active_run_id = ?, updated_at = ? WHERE id = ? AND status IN ('Ready', 'Changes Requested') AND active_run_id IS NULL").run(agentId, runId, now, next.id);
     if (Number(claimed.changes) !== 1) throw new Error(`Ticket ${next.id} konnte nicht atomar reserviert werden`);
-    db.prepare("INSERT INTO agent_runs (id, task_id, agent_id, role, status, attempt_no, input_json, created_at, started_at) VALUES (?, ?, ?, 'developer', 'running', ?, '{}', ?, ?)").run(runId, next.id, agentId, attemptNo, now, now);
+    db.prepare("INSERT INTO agent_runs (id, task_id, agent_id, role, status, attempt_no, input_json, created_at) VALUES (?, ?, ?, 'developer', 'queued', ?, '{}', ?)").run(runId, next.id, agentId, attemptNo, now);
     db.prepare("INSERT INTO agent_leases (id, task_id, agent_id, run_id, acquired_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)").run(id("lease"), next.id, agentId, runId, now, new Date(Date.now() + leaseDurationMs()).toISOString());
     addEventInternal(db, next.id, "task.claimed", "manager", "agent-manager", { runId, agentId }, now);
     db.exec("COMMIT");
@@ -864,7 +938,10 @@ export function getAgentRun(runId: string) {
   const db = getDatabase();
   const row = db.prepare(`SELECT agent_runs.id AS runId, agent_runs.task_id AS taskId, agent_runs.agent_id AS agentId,
     agent_runs.role, agent_runs.status, agent_runs.attempt_no AS attemptNo, agent_runs.input_json AS inputJson,
-    agent_runs.output_json AS outputJson, agent_runs.summary, agent_runs.error, agent_runs.process_id AS processId, agent_runs.started_at AS startedAt,
+    agent_runs.output_json AS outputJson, agent_runs.summary, agent_runs.error, agent_runs.process_id AS processId, agent_runs.process_identity AS processIdentity,
+    agent_runs.last_heartbeat_at AS lastHeartbeatAt, agent_runs.last_activity_at AS lastActivityAt, agent_runs.current_phase AS currentPhase,
+    agent_runs.progress, agent_runs.exit_code AS exitCode, agent_runs.signal, agent_runs.termination_reason AS terminationReason,
+    agent_runs.cancellation_requested_at AS cancellationRequestedAt, agent_runs.started_at AS startedAt,
     agent_runs.finished_at AS finishedAt, agents.name AS agentName, agents.provider
     FROM agent_runs JOIN agents ON agents.id = agent_runs.agent_id WHERE agent_runs.id = ?`).get(runId) as Row | undefined;
   if (!row) return undefined;
@@ -873,9 +950,11 @@ export function getAgentRun(runId: string) {
 
 export function listAgentRuns(taskId?: string, projectId?: string) {
   const db = getDatabase();
-  recoverStaleAgentRuns(db);
   const rows = db.prepare(`SELECT agent_runs.id AS runId, agent_runs.task_id AS taskId, agent_runs.agent_id AS agentId,
-    agent_runs.role, agent_runs.status, agent_runs.attempt_no AS attemptNo, agent_runs.summary, agent_runs.error, agent_runs.process_id AS processId,
+    agent_runs.role, agent_runs.status, agent_runs.attempt_no AS attemptNo, agent_runs.summary, agent_runs.error, agent_runs.process_id AS processId, agent_runs.process_identity AS processIdentity,
+    agent_runs.last_heartbeat_at AS lastHeartbeatAt, agent_runs.last_activity_at AS lastActivityAt, agent_runs.current_phase AS currentPhase,
+    agent_runs.progress, agent_runs.exit_code AS exitCode, agent_runs.signal, agent_runs.termination_reason AS terminationReason,
+    agent_runs.cancellation_requested_at AS cancellationRequestedAt,
     agent_runs.started_at AS startedAt, agent_runs.finished_at AS finishedAt, agent_runs.created_at AS createdAt,
     agents.name AS agentName, agents.provider
     FROM agent_runs JOIN agents ON agents.id = agent_runs.agent_id JOIN tasks ON tasks.id = agent_runs.task_id
@@ -885,9 +964,45 @@ export function listAgentRuns(taskId?: string, projectId?: string) {
   return rows;
 }
 
-export function setAgentRunProcessId(runId: string, processId?: number) {
+export function markAgentRunStarting(runId: string) {
   const db = getDatabase();
-  db.prepare("UPDATE agent_runs SET process_id = ? WHERE id = ? AND status IN ('queued', 'running')").run(processId ?? null, runId);
+  const run = db.prepare("SELECT status FROM agent_runs WHERE id = ?").get(runId) as Row | undefined;
+  if (!run) return undefined;
+  if (run.status === "starting") return getAgentRun(runId);
+  assertAgentRunTransition(run.status, "starting");
+  const now = timestamp();
+  db.prepare("UPDATE agent_runs SET status = 'starting', started_at = COALESCE(started_at, ?), current_phase = COALESCE(current_phase, 'launching'), last_activity_at = COALESCE(last_activity_at, ?) WHERE id = ?").run(now, now, runId);
+  return getAgentRun(runId);
+}
+
+export function markAgentRunRunning(runId: string) {
+  const db = getDatabase();
+  const run = db.prepare("SELECT status FROM agent_runs WHERE id = ?").get(runId) as Row | undefined;
+  if (!run) return undefined;
+  if (run.status === "running") return getAgentRun(runId);
+  if (run.status === "queued") {
+    assertAgentRunTransition(run.status, "starting");
+    db.prepare("UPDATE agent_runs SET status = 'starting' WHERE id = ?").run(runId);
+  }
+  const current = db.prepare("SELECT status FROM agent_runs WHERE id = ?").get(runId) as Row;
+  assertAgentRunTransition(current.status, "running");
+  const now = timestamp();
+  db.prepare("UPDATE agent_runs SET status = 'running', started_at = COALESCE(started_at, ?), last_heartbeat_at = ?, last_activity_at = ?, current_phase = COALESCE(current_phase, 'runner_started') WHERE id = ?").run(now, now, now, runId);
+  return getAgentRun(runId);
+}
+
+export function reportAgentRunActivity(runId: string, input: { phase?: string; progress?: number } = {}) {
+  const db = getDatabase();
+  const now = timestamp();
+  const progress = input.progress === undefined ? null : Math.max(0, Math.min(100, Math.round(input.progress)));
+  const result = db.prepare(`UPDATE agent_runs SET last_activity_at = ?, current_phase = COALESCE(?, current_phase), progress = COALESCE(?, progress)
+    WHERE id = ? AND status IN ('queued', 'starting', 'running', 'cancelling')`).run(now, input.phase?.trim() || null, progress, runId);
+  return { reported: Number(result.changes) > 0, at: now };
+}
+
+export function setAgentRunProcessId(runId: string, processId?: number, processIdentity?: string) {
+  const db = getDatabase();
+  db.prepare("UPDATE agent_runs SET process_id = ?, process_identity = ? WHERE id = ? AND status IN ('queued', 'starting', 'running', 'cancelling')").run(processId ?? null, processIdentity ?? null, runId);
   return getAgentRun(runId);
 }
 
@@ -897,23 +1012,83 @@ export function renewAgentRunLease(runId: string) {
   const expiresAt = new Date(Date.now() + leaseDurationMs()).toISOString();
   const result = db.prepare(`UPDATE agent_leases SET expires_at = ?
     WHERE run_id = ?
-      AND EXISTS (SELECT 1 FROM agent_runs WHERE agent_runs.id = agent_leases.run_id AND agent_runs.status IN ('queued', 'running'))
+      AND EXISTS (SELECT 1 FROM agent_runs WHERE agent_runs.id = agent_leases.run_id AND agent_runs.status IN ('queued', 'starting', 'running', 'cancelling'))
       AND EXISTS (SELECT 1 FROM tasks WHERE tasks.id = agent_leases.task_id AND tasks.active_run_id = agent_leases.run_id)`).run(expiresAt, runId);
   if (Number(result.changes) > 0) {
-    db.prepare("UPDATE agent_runs SET started_at = COALESCE(started_at, ?) WHERE id = ?").run(now, runId);
+    db.prepare("UPDATE agent_runs SET started_at = COALESCE(started_at, ?), last_heartbeat_at = ? WHERE id = ?").run(now, now, runId);
   }
-  return { renewed: Number(result.changes) > 0, expiresAt };
+  const run = db.prepare("SELECT status, cancellation_requested_at AS cancellationRequestedAt FROM agent_runs WHERE id = ?").get(runId) as Row | undefined;
+  return { renewed: Number(result.changes) > 0, expiresAt, cancellationRequested: run?.status === "cancelling", cancellationRequestedAt: run?.cancellationRequestedAt ?? null };
+}
+
+export function isAgentRunCancellationRequested(runId: string) {
+  const db = getDatabase();
+  const row = db.prepare("SELECT status FROM agent_runs WHERE id = ?").get(runId) as Row | undefined;
+  return row?.status === "cancelling";
+}
+
+export function listActiveAgentRuns(projectId?: string) {
+  const db = getDatabase();
+  return db.prepare(`SELECT runs.id AS runId, runs.task_id AS taskId, runs.agent_id AS agentId, runs.role, runs.status,
+    runs.process_id AS processId, runs.process_identity AS processIdentity, runs.created_at AS createdAt,
+    runs.started_at AS startedAt, runs.last_heartbeat_at AS lastHeartbeatAt, runs.last_activity_at AS lastActivityAt,
+    runs.cancellation_requested_at AS cancellationRequestedAt, runs.termination_reason AS terminationReason, leases.expires_at AS leaseExpiresAt
+    FROM agent_runs AS runs
+    JOIN tasks ON tasks.id = runs.task_id
+    LEFT JOIN agent_leases AS leases ON leases.run_id = runs.id
+    WHERE runs.status IN ('queued', 'starting', 'running', 'cancelling')
+      AND (? IS NULL OR tasks.project_id = ?)
+    ORDER BY runs.created_at ASC`).all(projectId ?? null, projectId ?? null) as Row[];
+}
+
+export function requestAgentRunCancellation(runId: string, input: { reason?: string; requestedBy?: string } = {}) {
+  const db = getDatabase();
+  const now = timestamp();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const run = db.prepare("SELECT id, task_id AS taskId, status FROM agent_runs WHERE id = ?").get(runId) as Row | undefined;
+    if (!run || !["queued", "starting", "running", "cancelling"].includes(String(run.status))) { db.exec("ROLLBACK"); return undefined; }
+    if (run.status !== "cancelling") {
+      assertAgentRunTransition(run.status, "cancelling");
+      db.prepare("UPDATE agent_runs SET status = 'cancelling', cancellation_requested_at = ?, current_phase = 'cancelling', termination_reason = COALESCE(termination_reason, ?) WHERE id = ?").run(now, input.reason ?? "USER_CANCELLED", runId);
+      addEventInternal(db, String(run.taskId), "agent.run_cancellation_requested", "manager", input.requestedBy ?? "agent-manager", { runId, reason: input.reason ?? "USER_CANCELLED" }, now);
+    }
+    db.exec("COMMIT");
+  } catch (error) { db.exec("ROLLBACK"); throw error; }
+  return getAgentRun(runId);
+}
+
+export function finalizeAgentRunCancellation(runId: string, input: { reason?: string; terminationReason?: string } = {}) {
+  const db = getDatabase();
+  const now = timestamp();
+  let taskId: string | undefined;
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const run = db.prepare(`SELECT runs.id, runs.task_id AS taskId, runs.role, runs.status, tasks.active_run_id AS activeRunId
+      FROM agent_runs AS runs JOIN tasks ON tasks.id = runs.task_id WHERE runs.id = ?`).get(runId) as Row | undefined;
+    if (!run || run.status !== "cancelling" || run.activeRunId !== runId) { db.exec("ROLLBACK"); return undefined; }
+    taskId = String(run.taskId);
+    assertAgentRunTransition(run.status, "cancelled");
+    const reason = input.reason ?? "Lauf wurde vom Benutzer abgebrochen. Ein neuer Versuch ist möglich.";
+    const nextStatus = run.role === "tester" ? "Review" : "Ready";
+    db.prepare("UPDATE agent_runs SET status = 'cancelled', summary = ?, error = 'USER_CANCELLED', termination_reason = ?, process_id = NULL, process_identity = NULL, finished_at = ? WHERE id = ?").run(reason, input.terminationReason ?? "user_cancelled", now, runId);
+    db.prepare("DELETE FROM agent_leases WHERE run_id = ?").run(runId);
+    db.prepare("UPDATE agent_requests SET status = 'cancelled', finished_at = ?, duration_ms = MAX(0, CAST((julianday(?) - julianday(started_at)) * 86400000 AS INTEGER)), error = COALESCE(error, 'USER_CANCELLED') WHERE run_id = ? AND status = 'running'").run(now, now, runId);
+    db.prepare("UPDATE tasks SET status = ?, active_run_id = NULL, assignee_agent_id = NULL, updated_at = ? WHERE id = ? AND active_run_id = ?").run(nextStatus, now, run.taskId, runId);
+    addEventInternal(db, taskId, "agent.run_cancelled", "manager", "agent-manager", { runId, nextStatus, terminationReason: input.terminationReason ?? "user_cancelled" }, now);
+    db.exec("COMMIT");
+  } catch (error) { db.exec("ROLLBACK"); throw error; }
+  return listTasks().find((task) => task.id === taskId);
 }
 
 export function startTesterRun(taskId: string, agentId = "agent-tester-1", projectId?: string) {
   const db = getDatabase();
-  recoverStaleAgentRuns(db);
   const now = timestamp();
   db.exec("BEGIN IMMEDIATE");
   try {
     const agent = db.prepare("SELECT max_concurrency FROM agents WHERE id = ? AND role = 'tester'").get(agentId) as { max_concurrency: number } | undefined;
     if (!agent) { db.exec("COMMIT"); return { runId: undefined, reason: "unknown_tester" }; }
-    const active = db.prepare("SELECT COUNT(*) AS count FROM agent_runs WHERE agent_id = ? AND status IN ('queued', 'running')").get(agentId) as { count: number };
+    const active = db.prepare("SELECT COUNT(*) AS count FROM agent_runs WHERE agent_id = ? AND status IN ('queued', 'starting', 'running', 'cancelling')").get(agentId) as { count: number };
     if (Number(active.count) >= Number(agent.max_concurrency)) { db.exec("COMMIT"); return { runId: undefined, reason: "tester_capacity" }; }
     const task = db.prepare("SELECT id, project_id, status, active_run_id FROM tasks WHERE id = ? AND (? IS NULL OR project_id = ?)").get(taskId, projectId ?? null, projectId ?? null) as Row | undefined;
     if (!task) { db.exec("COMMIT"); return { runId: undefined, reason: "task_not_found" }; }
@@ -924,7 +1099,7 @@ export function startTesterRun(taskId: string, agentId = "agent-tester-1", proje
       WHERE tester.task_id = ? AND tester.role = 'tester'
         AND tester.created_at > COALESCE((SELECT MAX(developer.created_at) FROM agent_runs AS developer WHERE developer.task_id = ? AND developer.role = 'developer'), '')`).get(taskId, taskId) as Row;
     const attemptNo = Number(previousAttempt.attemptNo ?? 0) + 1;
-    db.prepare("INSERT INTO agent_runs (id, task_id, agent_id, role, status, attempt_no, input_json, created_at, started_at) VALUES (?, ?, ?, 'tester', 'running', ?, '{}', ?, ?)").run(runId, taskId, agentId, attemptNo, now, now);
+    db.prepare("INSERT INTO agent_runs (id, task_id, agent_id, role, status, attempt_no, input_json, created_at) VALUES (?, ?, ?, 'tester', 'queued', ?, '{}', ?)").run(runId, taskId, agentId, attemptNo, now);
     db.prepare("INSERT INTO agent_leases (id, task_id, agent_id, run_id, acquired_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)").run(id("lease"), taskId, agentId, runId, now, new Date(Date.now() + leaseDurationMs()).toISOString());
     db.prepare("UPDATE tasks SET status = 'Testing', assignee_agent_id = ?, active_run_id = ?, updated_at = ? WHERE id = ? AND status = 'Review' AND active_run_id IS NULL").run(agentId, runId, now, taskId);
     addEventInternal(db, taskId, "tester.run_started", "manager", "agent-manager", { runId, agentId }, now);
@@ -940,14 +1115,16 @@ export function recoverTesterRun(runId: string, input: { summary?: string; error
   let finishedTaskId: string | undefined;
   db.exec("BEGIN IMMEDIATE");
   try {
-    const run = db.prepare("SELECT id, task_id AS taskId, attempt_no AS attemptNo FROM agent_runs WHERE id = ? AND role = 'tester' AND status IN ('queued', 'running')").get(runId) as Row | undefined;
+    const run = db.prepare("SELECT id, task_id AS taskId, status, attempt_no AS attemptNo FROM agent_runs WHERE id = ? AND role = 'tester' AND status IN ('queued', 'starting', 'running', 'cancelling')").get(runId) as Row | undefined;
     if (!run) { db.exec("ROLLBACK"); return undefined; }
     finishedTaskId = String(run.taskId);
     const exhausted = input.countRecovery !== false && Number(run.attemptNo) >= testerRecoveryLimit();
     const nextStatus = exhausted ? "Blocked" : "Review";
     const finalSummary = exhausted ? `${summary} Die automatische Recovery-Grenze wurde erreicht.` : summary;
     const reportId = id("report");
-    db.prepare("UPDATE agent_runs SET status = 'blocked', summary = ?, error = ?, process_id = NULL, finished_at = ? WHERE id = ?").run(finalSummary, input.error ?? finalSummary, now, runId);
+    const terminalStatus = input.error === "USER_CANCELLED" ? "cancelled" : "lost";
+    assertAgentRunTransition(run.status, terminalStatus);
+    db.prepare("UPDATE agent_runs SET status = ?, summary = ?, error = ?, termination_reason = ?, process_id = NULL, finished_at = ? WHERE id = ?").run(terminalStatus, finalSummary, input.error ?? finalSummary, input.error === "USER_CANCELLED" ? "user_cancelled" : "runner_recovery", now, runId);
     db.prepare("INSERT INTO test_reports (id, task_id, agent_run_id, status, summary, checks_json, logs, created_at) VALUES (?, ?, ?, 'blocked', ?, '[]', '', ?)").run(reportId, run.taskId, runId, finalSummary, now);
     db.prepare("DELETE FROM agent_leases WHERE run_id = ?").run(runId);
     db.prepare("UPDATE tasks SET status = ?, active_run_id = NULL, assignee_agent_id = NULL, updated_at = ? WHERE id = ? AND active_run_id = ?").run(nextStatus, now, run.taskId, runId);
@@ -968,9 +1145,9 @@ export function finishTesterRun(runId: string, input: { status: "passed" | "fail
   let finishedTaskId: string | undefined;
   db.exec("BEGIN IMMEDIATE");
   try {
-    const run = db.prepare(`SELECT runs.task_id, tasks.active_run_id AS activeRunId, tasks.status AS taskStatus
+    const run = db.prepare(`SELECT runs.task_id, runs.status, tasks.active_run_id AS activeRunId, tasks.status AS taskStatus
       FROM agent_runs AS runs JOIN tasks ON tasks.id = runs.task_id
-      WHERE runs.id = ? AND runs.role = 'tester' AND runs.status IN ('queued', 'running')`).get(runId) as { task_id: string; activeRunId?: string; taskStatus?: string } | undefined;
+      WHERE runs.id = ? AND runs.role = 'tester' AND runs.status IN ('queued', 'starting', 'running', 'cancelling')`).get(runId) as { task_id: string; status: string; activeRunId?: string; taskStatus?: string } | undefined;
     if (!run) { db.exec("ROLLBACK"); return undefined; }
     if (run.activeRunId !== runId || run.taskStatus !== "Testing") {
       db.exec("ROLLBACK");
@@ -979,7 +1156,9 @@ export function finishTesterRun(runId: string, input: { status: "passed" | "fail
     finishedTaskId = run.task_id;
     const nextStatus = input.status === "passed" ? "Done" : input.status === "blocked" ? "Blocked" : "Changes Requested";
     const reportId = id("report");
-    db.prepare("UPDATE agent_runs SET status = ?, summary = ?, output_json = ?, error = ?, process_id = NULL, finished_at = ? WHERE id = ?").run(input.status === "passed" ? "succeeded" : input.status === "blocked" ? "blocked" : "failed", input.summary ?? "", JSON.stringify({ checks: input.checks ?? [], logs: input.logs ?? "" }), input.error ?? null, now, runId);
+    const terminalStatus = input.status === "passed" ? "succeeded" : "failed";
+    assertAgentRunTransition(run.status, terminalStatus);
+    db.prepare("UPDATE agent_runs SET status = ?, summary = ?, output_json = ?, error = ?, termination_reason = ?, process_id = NULL, finished_at = ? WHERE id = ?").run(terminalStatus, input.summary ?? "", JSON.stringify({ checks: input.checks ?? [], logs: input.logs ?? "" }), input.error ?? null, input.status === "blocked" ? "test_environment_blocked" : input.status === "failed" ? "test_failed" : "completed", now, runId);
     db.prepare("INSERT INTO test_reports (id, task_id, agent_run_id, status, summary, checks_json, logs, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(reportId, run.task_id, runId, input.status, input.summary ?? "", JSON.stringify(input.checks ?? []), input.logs ?? "", now);
     db.prepare("DELETE FROM agent_leases WHERE run_id = ?").run(runId);
     db.prepare("UPDATE tasks SET status = ?, active_run_id = NULL, updated_at = ? WHERE id = ? AND active_run_id = ?").run(nextStatus, now, run.task_id, runId);
@@ -1075,7 +1254,7 @@ export function resumeSourceTaskAfterFollowUp(followUpTaskId: string) {
   return listTasks(projectId).find((task) => task.id === sourceTaskId);
 }
 
-export function finishAgentRun(runId: string, input: { status: "succeeded" | "failed"; summary?: string; error?: string; nextStatus?: string; countRetry?: boolean }) {
+export function finishAgentRun(runId: string, input: { status: "succeeded" | "failed" | "timed_out" | "lost"; summary?: string; error?: string; nextStatus?: string; countRetry?: boolean; exitCode?: number | null; signal?: string | null; terminationReason?: string }) {
   const db = getDatabase();
   const now = timestamp();
   let finishedTaskId: string | undefined;
@@ -1090,7 +1269,7 @@ export function finishAgentRun(runId: string, input: { status: "succeeded" | "fa
       db.exec("ROLLBACK");
       return undefined;
     }
-    if (!["queued", "running"].includes(String(run.status))) {
+    if (!["queued", "starting", "running", "cancelling"].includes(String(run.status))) {
       db.exec("COMMIT");
       return listTasks().find((task) => task.id === finishedTaskId);
     }
@@ -1098,15 +1277,17 @@ export function finishAgentRun(runId: string, input: { status: "succeeded" | "fa
       db.exec("ROLLBACK");
       return undefined;
     }
-    const countRetry = input.status === "failed" && input.countRetry !== false;
+    const failureStatus = input.status !== "succeeded";
+    const countRetry = failureStatus && input.countRetry !== false;
     const retryCount = input.status === "succeeded" ? 0 : Number(run.retryCount ?? 0) + (countRetry ? 1 : 0);
-    const exhausted = input.status === "failed" && countRetry && retryCount >= Number(run.maxRetries ?? 3);
+    const exhausted = failureStatus && countRetry && retryCount >= Number(run.maxRetries ?? 3);
     const nextStatus = exhausted ? "Blocked" : input.nextStatus ?? (input.status === "succeeded" ? "Review" : "Ready");
     const expectedNextStatus = input.status === "succeeded" ? "Review" : "Ready";
     if (!exhausted && nextStatus !== expectedNextStatus) throw new Error(`Ungültiger Folgestatus ${nextStatus} für einen Entwicklerlauf mit Status ${input.status}`);
-    db.prepare("UPDATE agent_runs SET status = ?, summary = ?, error = ?, process_id = NULL, finished_at = ? WHERE id = ?").run(input.status, input.summary ?? "", input.error ?? null, now, runId);
+    assertAgentRunTransition(run.status, input.status);
+    db.prepare("UPDATE agent_runs SET status = ?, summary = ?, error = ?, exit_code = ?, signal = ?, termination_reason = ?, process_id = NULL, finished_at = ? WHERE id = ?").run(input.status, input.summary ?? "", input.error ?? null, input.exitCode ?? null, input.signal ?? null, input.terminationReason ?? (input.status === "succeeded" ? "completed" : input.status === "timed_out" ? "timeout" : input.status === "lost" ? "orphaned_process" : "runner_failed"), now, runId);
     db.prepare("DELETE FROM agent_leases WHERE run_id = ?").run(runId);
-    db.prepare("UPDATE agent_requests SET status = ?, finished_at = ?, duration_ms = MAX(0, CAST((julianday(?) - julianday(started_at)) * 86400000 AS INTEGER)), error = COALESCE(error, ?) WHERE run_id = ? AND status = 'running'").run(input.status === "succeeded" ? "succeeded" : "failed", now, now, input.error ?? input.summary ?? "Agentenlauf beendet", runId);
+    db.prepare("UPDATE agent_requests SET status = ?, finished_at = ?, duration_ms = MAX(0, CAST((julianday(?) - julianday(started_at)) * 86400000 AS INTEGER)), error = COALESCE(error, ?) WHERE run_id = ? AND status = 'running'").run(input.status === "succeeded" ? "succeeded" : input.status === "timed_out" ? "timeout" : "failed", now, now, input.error ?? input.summary ?? "Agentenlauf beendet", runId);
     db.prepare("UPDATE tasks SET status = ?, retry_count = ?, active_run_id = NULL, assignee_agent_id = NULL, updated_at = ? WHERE id = ? AND active_run_id = ?").run(nextStatus, retryCount, now, run.taskId, runId);
     addEventInternal(db, String(run.taskId), "agent.run_finished", "agent", runId, { status: input.status, nextStatus, retryCount, exhausted, summary: input.summary ?? "" }, now);
     if (exhausted) addCommentInternal(db, String(run.taskId), "manager", "agent-manager", "Mira", `Der Entwicklerlauf ist ${retryCount}-mal fehlgeschlagen. Das Ticket wurde nach Erreichen der Retry-Grenze blockiert.`, now);

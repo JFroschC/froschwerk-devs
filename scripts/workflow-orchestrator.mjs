@@ -1,9 +1,10 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { accessSync, constants, existsSync, statSync } from "node:fs";
-import { addChatMessage, applyManagerPlan, claimNextTask, createFollowUpManagerPlan, finishAgentRun, finishTesterRun, getAgent, getAgentRun, getProject, listAgentRuns, listProjects, listTasks, recoverTesterRun, resumeSourceTaskAfterFollowUp, setAgentRunProcessId, startTesterRun, updateTask } from "../db/local.ts";
+import { addChatMessage, applyManagerPlan, claimNextTask, createFollowUpManagerPlan, finalizeAgentRunCancellation, finishAgentRun, finishTesterRun, getAgent, getAgentRun, getProject, listActiveAgentRuns, listAgentRuns, listProjects, listTasks, markAgentRunStarting, recoverTesterRun, requestAgentRunCancellation, resumeSourceTaskAfterFollowUp, setAgentRunProcessId, startTesterRun, updateTask } from "../db/local.ts";
 import { checkRuntime } from "./runtime-check.mjs";
 import { runtimeEnvironment } from "./runtime-env.mjs";
+import { inspectProcess, processIdentity, requestProcessStop } from "./process-identity.mjs";
 
 const projectRoot = fileURLToPath(new URL("..", import.meta.url));
 const launchedProcesses = new Map();
@@ -15,22 +16,6 @@ function terminateProcessTree(child) {
   } else {
     child.kill("SIGTERM");
     setTimeout(() => child.kill("SIGKILL"), 5_000).unref();
-  }
-}
-
-function terminateProcessId(processId) {
-  if (!processId) return;
-  if (process.platform === "win32") spawn("taskkill", ["/pid", String(processId), "/t", "/f"], { windowsHide: true, stdio: "ignore" });
-  else process.kill(processId, "SIGTERM");
-}
-
-function processIsAlive(processId) {
-  if (!processId) return false;
-  try {
-    process.kill(Number(processId), 0);
-    return true;
-  } catch (error) {
-    return error?.code === "EPERM";
   }
 }
 
@@ -49,6 +34,7 @@ function workspaceForProject(projectId, mode = "read") {
 
 function launchAgentProcess(agentId, taskId, runId, projectId) {
   const workspace = workspaceForProject(projectId, "write");
+  markAgentRunStarting(runId);
   const child = spawn(process.execPath, ["--experimental-strip-types", `${projectRoot}scripts/run-agent.mjs`, "--agent", agentId, "--task", taskId, "--run-id", runId, "--workspace", workspace], {
     cwd: workspace,
     env: runtimeEnvironment(workspace),
@@ -62,19 +48,20 @@ function launchAgentProcess(agentId, taskId, runId, projectId) {
   });
   child.on("exit", (code, signal) => {
     launchedProcesses.delete(runId);
-    if (!["queued", "running"].includes(String(getAgentRun(runId)?.status))) return;
+    if (!["queued", "starting", "running", "cancelling"].includes(String(getAgentRun(runId)?.status))) return;
     const reason = `Entwicklerprozess wurde unerwartet beendet (Code ${code ?? "unbekannt"}${signal ? `, ${signal}` : ""}).`;
     const recovered = finishAgentRun(runId, { status: "failed", summary: reason, error: "DEVELOPER_PROCESS_EXIT", nextStatus: "Ready" });
     addChatMessage({ senderType: "manager", projectId, body: `${reason} ${recovered?.status === "Blocked" ? "Die Retry-Grenze wurde erreicht." : "Der Autoprozess versucht das Ticket erneut."}` });
     if (recovered?.status === "Ready" && getProject(projectId)?.autoProcessEnabled) setImmediate(() => advanceAutoProcess(projectId));
   });
   launchedProcesses.set(runId, child);
-  setAgentRunProcessId(runId, child.pid);
+  setAgentRunProcessId(runId, child.pid, processIdentity(child.pid));
   return child.pid;
 }
 
 function launchTesterProcess(runId, projectId) {
   const workspace = workspaceForProject(projectId);
+  markAgentRunStarting(runId);
   const child = spawn(process.execPath, ["--experimental-strip-types", `${projectRoot}scripts/run-tester.mjs`, "--run-id", runId], {
     cwd: workspace,
     env: runtimeEnvironment(workspace),
@@ -91,32 +78,104 @@ function launchTesterProcess(runId, projectId) {
     launchedProcesses.delete(runId);
     // A normal tester completion has already finalized its own run. This only
     // handles abrupt process exits, so the board cannot keep a phantom active tester.
-    if (getAgentRun(runId)?.status !== "running") return;
+    if (!["queued", "starting", "running", "cancelling"].includes(String(getAgentRun(runId)?.status))) return;
     const reason = `Testerprozess wurde unerwartet beendet (Code ${code ?? "unbekannt"}${signal ? `, ${signal}` : ""}).`;
     const recovered = recoverTesterRun(runId, { summary: `${reason} Ein neuer Testerstart ist möglich.`, error: reason });
     addChatMessage({ senderType: "manager", projectId, body: `${reason} ${recovered?.status === "Review" ? "Der Lauf wurde freigegeben und wird automatisch neu gestartet." : "Die Recovery-Grenze wurde erreicht; das Ticket ist blockiert."}` });
     if (recovered?.status === "Review" && getProject(projectId)?.autoProcessEnabled) setImmediate(() => advanceAutoProcess(projectId));
   });
   launchedProcesses.set(runId, child);
-  setAgentRunProcessId(runId, child.pid);
+  setAgentRunProcessId(runId, child.pid, processIdentity(child.pid));
   return child.pid;
 }
 
 export function cancelActiveRun(runId) {
   const run = getAgentRun(runId);
-  if (!run || !["queued", "running"].includes(run.status)) return { reason: "run_not_active" };
-  const child = launchedProcesses.get(runId);
-  if (!child?.pid && !run.processId) return { reason: "process_not_available", error: "Der Prozess ist nicht mehr mit diesem Harness-Server verbunden. Bitte den gestarteten Codex-Prozess im FroschAgent-Terminal beenden." };
-  const task = run.task;
-  const reason = "Lauf wurde vom Benutzer abgebrochen. Das Ticket kann erneut gestartet werden.";
-  if (child?.pid) terminateProcessTree(child);
-  else terminateProcessId(run.processId);
-  launchedProcesses.delete(runId);
-  const recoveredTask = run.role === "tester"
-    ? recoverTesterRun(runId, { summary: reason, error: "USER_CANCELLED", countRecovery: false })
-    : finishAgentRun(runId, { status: "failed", summary: reason, error: "USER_CANCELLED", nextStatus: "Ready", countRetry: false });
-  if (task?.projectId) addChatMessage({ senderType: "manager", projectId: task.projectId, body: `${task.id}: ${reason}` });
-  return { cancelled: true, task: recoveredTask };
+  if (!run || !["queued", "starting", "running", "cancelling"].includes(run.status)) return { reason: "run_not_active" };
+  const requested = requestAgentRunCancellation(runId, { reason: "USER_CANCELLED" });
+  if (!requested) return { reason: "run_not_active" };
+  if (run.task?.projectId) addChatMessage({ senderType: "manager", projectId: run.task.projectId, body: `${run.task.id}: Abbruch angefordert. Der Lauf bleibt gesperrt, bis sein Prozess bestätigt beendet ist.` });
+  return { cancelled: true, cancelling: true, run: requested };
+}
+
+function lifecycleNumber(name, fallback) {
+  const value = Number(process.env[name] ?? fallback);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function lifecycleAge(value) {
+  const time = Date.parse(String(value ?? ""));
+  return Number.isFinite(time) ? Date.now() - time : Number.POSITIVE_INFINITY;
+}
+
+/**
+ * Idempotent supervisor: it never releases a ticket before its exact process
+ * has disappeared. A persisted identity prevents killing an unrelated process
+ * when Windows/Linux has reused the old PID.
+ */
+export function sweepAgentLifecycle(projectId) {
+  const results = [];
+  const startTimeout = lifecycleNumber("AGENT_RUN_START_TIMEOUT_MS", 60_000);
+  const inactivityTimeout = lifecycleNumber("AGENT_RUN_ACTIVITY_TIMEOUT_MS", 15 * 60_000);
+  const cancelGrace = lifecycleNumber("AGENT_CANCEL_GRACE_MS", 15_000);
+  for (const run of listActiveAgentRuns(projectId)) {
+    const launched = launchedProcesses.get(run.runId);
+    const observed = launched?.pid
+      ? { state: launched.exitCode === null ? "alive" : "missing" }
+      : inspectProcess(run.processId, run.processIdentity);
+    const processPresent = observed.state === "alive";
+    const staleLease = !run.leaseExpiresAt || lifecycleAge(run.leaseExpiresAt) > 0;
+    const inactive = run.status === "running" && lifecycleAge(run.lastActivityAt ?? run.startedAt ?? run.createdAt) > inactivityTimeout;
+    const startupExpired = ["queued", "starting"].includes(run.status) && lifecycleAge(run.createdAt) > startTimeout;
+
+    if (run.status !== "cancelling" && (staleLease || inactive || startupExpired || observed.state === "reused" || observed.state === "unverified" || (!processPresent && run.processId))) {
+      const reason = staleLease ? "lease_expired" : inactive ? "output_inactive" : startupExpired ? "start_timeout" : observed.state === "reused" ? "process_identity_mismatch" : observed.state === "unverified" ? "unverified_process" : "process_missing";
+      requestAgentRunCancellation(run.runId, { reason, requestedBy: "lifecycle-supervisor" });
+      results.push({ runId: run.runId, action: "cancelling", reason });
+      continue;
+    }
+
+    if (run.status !== "cancelling") continue;
+    if (observed.state === "unverified") {
+      // We know a PID exists but cannot prove it belongs to this run. Keeping
+      // the ticket locked is safer than killing/releasing an unrelated live
+      // process. Fresh launches always persist an identity.
+      results.push({ runId: run.runId, action: "manual_intervention", reason: "unverified_process" });
+      continue;
+    }
+    if (!run.processId || observed.state === "missing" || observed.state === "reused") {
+      const cancelledByUser = run.terminationReason === "USER_CANCELLED";
+      const task = cancelledByUser
+        ? finalizeAgentRunCancellation(run.runId, { terminationReason: "user_cancelled" })
+        : run.role === "tester"
+          ? recoverTesterRun(run.runId, { summary: `Tester-Lauf wurde vom Lifecycle-Supervisor beendet (${observed.state}).`, error: "LIFECYCLE_RECOVERY" })
+          : finishAgentRun(run.runId, { status: "lost", summary: `Entwickler-Lauf wurde vom Lifecycle-Supervisor beendet (${observed.state}).`, error: "LIFECYCLE_RECOVERY", terminationReason: observed.state === "reused" ? "process_identity_mismatch" : "process_missing", nextStatus: "Ready" });
+      results.push({ runId: run.runId, action: task ? "released" : "unchanged", reason: observed.state });
+      continue;
+    }
+    if (lifecycleAge(run.cancellationRequestedAt) >= cancelGrace) {
+      if (launched?.pid) terminateProcessTree(launched);
+      else requestProcessStop(run.processId, { force: true });
+      results.push({ runId: run.runId, action: "force_stop", reason: "cancel_grace_expired" });
+    } else {
+      // Cooperative stop: the runner sees `cancelling` and closes its own
+      // provider child. Never kill here before the grace period expires.
+      results.push({ runId: run.runId, action: "awaiting_cooperative_stop" });
+    }
+  }
+  return results;
+}
+
+let lifecycleSupervisor;
+export function startLifecycleSupervisor() {
+  if (lifecycleSupervisor) return lifecycleSupervisor;
+  const interval = lifecycleNumber("AGENT_LIFECYCLE_SWEEP_MS", 10_000);
+  lifecycleSupervisor = setInterval(() => {
+    try { sweepAgentLifecycle(); } catch (error) { console.error("[lifecycle-supervisor] sweep failed", error); }
+  }, interval);
+  lifecycleSupervisor.unref();
+  try { sweepAgentLifecycle(); } catch (error) { console.error("[lifecycle-supervisor] initial sweep failed", error); }
+  return lifecycleSupervisor;
 }
 
 export function claimAndLaunchDeveloper(agentId, taskId, projectId) {
@@ -170,7 +229,7 @@ export function selectAutoProcessAction(projectId) {
   if (!project || project.status === "archived") return { type: "none", reason: "project_unavailable" };
   if (!project.autoProcessEnabled) return { type: "none", reason: "auto_process_disabled" };
 
-  const activeRun = listAgentRuns(undefined, projectId).find((run) => ["queued", "running"].includes(String(run.status)));
+  const activeRun = listAgentRuns(undefined, projectId).find((run) => ["queued", "starting", "running", "cancelling"].includes(String(run.status)));
   if (activeRun) return { type: "wait", reason: "active_run", run: activeRun };
 
   const tasks = listTasks(projectId);
@@ -208,15 +267,7 @@ export function advanceAutoProcess(projectId, { announce = false } = {}) {
 }
 
 export function recoverOrphanedRuns(projectId) {
-  const recovered = [];
-  for (const run of listAgentRuns(undefined, projectId).filter((entry) => ["queued", "running"].includes(String(entry.status)))) {
-    if (processIsAlive(run.processId)) continue;
-    const task = run.role === "tester"
-      ? recoverTesterRun(run.runId, { summary: "Testerprozess war nach dem Harness-Neustart nicht mehr aktiv.", error: "ORPHANED_PROCESS" })
-      : finishAgentRun(run.runId, { status: "failed", summary: "Entwicklerprozess war nach dem Harness-Neustart nicht mehr aktiv.", error: "ORPHANED_PROCESS", nextStatus: "Ready" });
-    recovered.push({ runId: run.runId, task });
-  }
-  return recovered;
+  return sweepAgentLifecycle(projectId);
 }
 
 export function resumeAutoProcesses() {

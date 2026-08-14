@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { getAgentRun, getProject, recoverTesterRun, renewAgentRunLease } from "../db/local.ts";
+import { getAgentRun, getProject, isAgentRunCancellationRequested, markAgentRunRunning, recoverTesterRun, renewAgentRunLease, reportAgentRunActivity } from "../db/local.ts";
 import { providerDefinition } from "./providers.mjs";
 import { finishTesterAndContinue } from "./workflow-orchestrator.mjs";
 import { codexExecArgs, codexExitDiagnostic } from "./codex-cli.mjs";
@@ -17,7 +17,7 @@ const runId = valueFor("--run-id");
 if (!runId) throw new Error("--run-id ist erforderlich");
 const run = getAgentRun(runId);
 if (!run || run.role !== "tester") throw new Error(`Tester-Lauf nicht gefunden: ${runId}`);
-if (!['queued', 'running'].includes(String(run.status)) || run.task?.activeRunId !== runId || run.task?.activeRunRole !== 'tester') {
+if (!['queued', 'starting', 'running', 'cancelling'].includes(String(run.status)) || run.task?.activeRunId !== runId || run.task?.activeRunRole !== 'tester') {
   throw new Error(`Tester-Lauf ${runId} ist nicht der gültige aktive Tester-Lauf seines Tickets.`);
 }
 const definition = providerDefinition(String(run.provider));
@@ -76,9 +76,34 @@ const commandArgs = String(run.provider) === "codex"
   : ["-p", "--model", claudeTesterModel, "--output-format", "stream-json", "--verbose", "--permission-mode", "acceptEdits", "--allowedTools", "Read", "Edit", "Glob", "Grep", "Bash(npm.cmd test)", "Bash(npm.cmd run *)", "Bash(git status *)", "Bash(git diff *)", "Bash(git log *)", "--no-session-persistence"];
 
 const request = startAgentRequest({ projectId: task?.projectId, taskId: task?.id, runId, agentId: run.agentId, role: "tester", provider: String(run.provider), model: String(run.provider) === "codex" ? codexTesterModel : `claude-${claudeTesterModel}`, command: `${definition.command} ${commandArgs.join(" ")}`, prompt });
-const leaseHeartbeat = setInterval(() => renewAgentRunLease(runId), 30_000);
+let activeChild;
+let leaseOwnershipLost = false;
+let cancellationRequested = false;
+function renewLeaseOwnership() {
+  if (leaseOwnershipLost) return;
+  const renewal = renewAgentRunLease(runId);
+  if (!renewal.renewed) {
+    leaseOwnershipLost = true;
+    console.error(`[tester-runner] Lease für ${runId} konnte nicht erneuert werden; der Runner beendet seinen Prozess und schreibt keinen Abschluss mehr.`);
+    terminateProcessTree(activeChild);
+    setTimeout(() => terminateProcessTree(activeChild, true), 5_000).unref();
+  } else if (renewal.cancellationRequested) observeCancellation();
+}
+
+function observeCancellation() {
+  if (cancellationRequested || !isAgentRunCancellationRequested(runId)) return;
+  cancellationRequested = true;
+  console.log(`[tester-runner] Abbruch für ${runId} bestätigt; beende den aktuellen Testprozess kooperativ.`);
+  terminateProcessTree(activeChild);
+  setTimeout(() => terminateProcessTree(activeChild, true), 15_000).unref();
+}
+markAgentRunRunning(runId);
+reportAgentRunActivity(runId, { phase: "agent_cli", progress: 0 });
+renewLeaseOwnership();
+const leaseHeartbeat = setInterval(renewLeaseOwnership, 30_000);
 leaseHeartbeat.unref();
-renewAgentRunLease(runId);
+const cancellationWatch = setInterval(observeCancellation, 1_000);
+cancellationWatch.unref();
 
 const reportStatuses = new Set(["passed", "failed", "blocked"]);
 
@@ -164,6 +189,7 @@ function runCli() {
     const cliEnv = runtimeEnvironment(testerWorkspace);
     const invocation = commandInvocation(definition.command, commandArgs, cliEnv);
     const child = spawn(invocation.command, invocation.args, { cwd: testerWorkspace, env: cliEnv, stdio: ["pipe", "pipe", "pipe"], windowsHide: false, shell: false });
+    activeChild = child;
     let stdout = "";
     let stderr = "";
     let settled = false;
@@ -174,12 +200,14 @@ function runCli() {
     };
     child.stdout.on("data", (chunk) => {
       stdout += chunk;
+      reportAgentRunActivity(runId, { phase: "agent_cli", progress: 50 });
       // Keep the full result for parsing, but do not hide the tester's output
       // from the Harness terminal while the run is active.
       process.stdout.write(chunk);
     });
     child.stderr.on("data", (chunk) => {
       stderr += chunk;
+      reportAgentRunActivity(runId, { phase: "agent_cli", progress: 50 });
       process.stderr.write(chunk);
     });
     child.on("error", (error) => fail(cliFailure(error.message, stdout, stderr)));
@@ -214,7 +242,8 @@ function runCli() {
       clearTimeout(maxRunTimeout);
       if (settled) return;
       settled = true;
-      if (timeoutTriggered) reject(cliFailure(timeoutReason, stdout, stderr));
+      if (leaseOwnershipLost) reject(cliFailure("LEASE_RENEWAL_FAILED: Der Runner besitzt diesen Lauf nicht mehr.", stdout, stderr));
+      else if (timeoutTriggered) reject(cliFailure(timeoutReason, stdout, stderr));
       else if (code === 0) resolve({ stdout, stderr });
       else reject(cliFailure(String(run.provider) === "codex" ? codexExitDiagnostic(code, stderr) : `Tester exit code ${code}`, stdout, stderr));
     });
@@ -224,13 +253,15 @@ function runCli() {
 
 function runProjectTests(command, cwd) {
   return new Promise((resolve) => {
+    reportAgentRunActivity(runId, { phase: "project_tests", progress: 85 });
     const startedAt = new Date().toISOString();
     const testRequest = startAgentRequest({ projectId: task.projectId, taskId: task.id, runId, agentId: run.agentId, role: "test-command", provider: "local", command, prompt: `Projekt-Testbefehl: ${command}` });
     const child = spawn(command, { cwd, env: runtimeEnvironment(cwd), shell: process.platform === "win32", stdio: ["ignore", "pipe", "pipe"], windowsHide: false });
+    activeChild = child;
     let stdout = "";
     let stderr = "";
-    child.stdout.on("data", (chunk) => { stdout += chunk; process.stdout.write(chunk); });
-    child.stderr.on("data", (chunk) => { stderr += chunk; process.stderr.write(chunk); });
+    child.stdout.on("data", (chunk) => { stdout += chunk; reportAgentRunActivity(runId, { phase: "project_tests", progress: 90 }); process.stdout.write(chunk); });
+    child.stderr.on("data", (chunk) => { stderr += chunk; reportAgentRunActivity(runId, { phase: "project_tests", progress: 90 }); process.stderr.write(chunk); });
     // A finished Node test with leaked servers/workers can remain silent forever.
     // Projects with legitimately long quiet integration tests can override this.
     const timeoutMs = idleTimeoutMs("PROJECT_TEST_IDLE_TIMEOUT_MS", 60_000);
@@ -290,6 +321,7 @@ async function requestAutoAdvance() {
 try {
   console.log(`[tester-runner] Starte ${definition.label} für ${task.id}`);
   const result = await runCli();
+  if (cancellationRequested || getAgentRun(runId)?.status === "cancelling") throw new Error("USER_CANCELLED");
   const report = parseOutput(result.stdout);
   const usage = extractUsage(`${result.stdout}\n${result.stderr}`);
   finishAgentRequest(request.requestId, { status: "succeeded", response: result.stdout, ...usage, startedAt: request.startedAt });
@@ -297,6 +329,7 @@ try {
   const testResult = testCommand.command
     ? await runProjectTests(testCommand.command, testerWorkspace)
     : { status: "blocked", logs: "Kein Testbefehl im aktiven Projekt konfiguriert." };
+  if (cancellationRequested || getAgentRun(runId)?.status === "cancelling") throw new Error("USER_CANCELLED");
   const reconciled = reconcileTesterResult(report, testResult.status);
   const finalStatus = reconciled.status;
   const testCommandLabel = testCommand.source === "package-script" ? "automatisch aus package.json erkannt" : testCommand.command;
@@ -310,22 +343,34 @@ try {
   try { await requestAutoAdvance(); } catch (advanceError) { console.error("[tester-runner] Autoprozess konnte nicht fortgesetzt werden", advanceError); }
   console.log(`[tester-runner] ${task.id}: ${report.status}`);
 } catch (error) {
+  if (leaseOwnershipLost) {
+    console.error(`[tester-runner] ${task.id}: Lease-Besitz verloren; kein Abschluss wird geschrieben.`);
+    process.exitCode = 1;
+  } else {
   const storedRun = getAgentRun(runId);
-  if (storedRun && !["queued", "running"].includes(String(storedRun.status))) {
+  if (storedRun && !["queued", "starting", "running", "cancelling"].includes(String(storedRun.status))) {
     console.log(`[tester-runner] ${task.id}: Lauf wurde bereits extern beendet (${storedRun.error ?? storedRun.status}); keine automatische Fortsetzung.`);
     process.exitCode = storedRun.error === "USER_CANCELLED" ? 0 : 1;
   } else {
     let errorText = error instanceof Error ? error.message : String(error);
     const diagnostic = error instanceof Error && typeof error.diagnostic === "string" ? error.diagnostic : "";
     if (diagnostic && !errorText.includes("Tester-Diagnose:")) errorText += `\n\nTester-Diagnose:\n${diagnostic}`;
-    const blocked = /REQUEST_TIMEOUT|CODEX_CLI_ARGUMENT_ERROR|sandbox|policy|browser|node.?repl|npm|git|zugriff verweigert|permission denied/i.test(errorText);
-    finishAgentRequest(request.requestId, { status: blocked ? "blocked" : "failed", response: diagnostic, error: errorText, startedAt: request.startedAt });
-    if (/REQUEST_TIMEOUT/i.test(errorText)) recoverTesterRun(runId, { summary: "Tester-Lauf wegen Timeout abgebrochen. Ein Neustart ist möglich.", error: errorText });
-    finishTesterAndContinue(runId, { status: blocked ? "blocked" : "failed", summary: blocked ? "Tester-Lauf wegen einer nicht verfügbaren Testumgebung blockiert." : "Tester-Lauf fehlgeschlagen.", error: errorText }, { launchNext: false });
-    try { await requestAutoAdvance(); } catch (advanceError) { console.error("[tester-runner] Autoprozess konnte nicht fortgesetzt werden", advanceError); }
-    console.error("[tester-runner] failed", error);
-    process.exitCode = 1;
+    if (cancellationRequested || errorText === "USER_CANCELLED" || storedRun?.status === "cancelling") {
+      finishAgentRequest(request.requestId, { status: "cancelled", response: diagnostic, error: "USER_CANCELLED", startedAt: request.startedAt });
+      recoverTesterRun(runId, { summary: "Tester-Lauf wurde vom Benutzer abgebrochen. Ein neuer Versuch ist möglich.", error: "USER_CANCELLED", countRecovery: false });
+      process.exitCode = 0;
+    } else {
+      const blocked = /REQUEST_TIMEOUT|CODEX_CLI_ARGUMENT_ERROR|sandbox|policy|browser|node.?repl|npm|git|zugriff verweigert|permission denied/i.test(errorText);
+      finishAgentRequest(request.requestId, { status: blocked ? "blocked" : "failed", response: diagnostic, error: errorText, startedAt: request.startedAt });
+      if (/REQUEST_TIMEOUT/i.test(errorText)) recoverTesterRun(runId, { summary: "Tester-Lauf wegen Timeout abgebrochen. Ein Neustart ist möglich.", error: errorText });
+      finishTesterAndContinue(runId, { status: blocked ? "blocked" : "failed", summary: blocked ? "Tester-Lauf wegen einer nicht verfügbaren Testumgebung blockiert." : "Tester-Lauf fehlgeschlagen.", error: errorText }, { launchNext: false });
+      try { await requestAutoAdvance(); } catch (advanceError) { console.error("[tester-runner] Autoprozess konnte nicht fortgesetzt werden", advanceError); }
+      console.error("[tester-runner] failed", error);
+      process.exitCode = 1;
+    }
+  }
   }
 } finally {
   clearInterval(leaseHeartbeat);
+  clearInterval(cancellationWatch);
 }

@@ -104,6 +104,7 @@ test("planned task sequence wins before priority when claiming ready work", () =
     db.applyManagerPlan(plan.id);
     const first = db.claimNextTask("agent-developer-1", undefined, "project-agent-harness");
     assert.equal(first.task.title, "Zuerst");
+    db.markAgentRunRunning(first.runId);
     db.finishAgentRun(first.runId, { status: "succeeded" });
     const second = db.claimNextTask("agent-developer-1", undefined, "project-agent-harness");
     assert.equal(second.task.title, "Später");
@@ -309,9 +310,11 @@ test("completed follow-up tickets automatically resume the original ticket in re
     const followUp = applied.tasks[0];
     const developer = db.claimNextTask("agent-developer-1", followUp.id, "project-agent-harness");
     assert.ok(developer.runId);
+    db.markAgentRunRunning(developer.runId);
     db.finishAgentRun(developer.runId, { status: "succeeded", summary: "Folgefehler behoben" });
     const followUpTester = db.startTesterRun(followUp.id, "agent-tester-1", "project-agent-harness");
     assert.ok(followUpTester.runId);
+    db.markAgentRunRunning(followUpTester.runId);
     const completed = finishTesterAndContinue(followUpTester.runId, { status: "passed", summary: "Folgefehler behoben und geprüft" }, { launchNext: false });
     assert.equal(completed.resumedSource.id, "FW-118");
     assert.equal(completed.resumedSource.status, "Review");
@@ -332,7 +335,7 @@ test("an interrupted tester run releases the ticket for a retry", () => {
     const recovered = recoverTesterRun(started.runId, { summary: "Testerprozess beendet" });
     assert.equal(recovered.status, "Review");
     assert.equal(recovered.activeRunId, null);
-    assert.equal(db.listAgentRuns("FW-118", "project-agent-harness").find((run) => run.runId === started.runId).status, "blocked");
+    assert.equal(db.listAgentRuns("FW-118", "project-agent-harness").find((run) => run.runId === started.runId).status, "lost");
     const restarted = db.startTesterRun("FW-118", "agent-tester-1", "project-agent-harness");
     assert.ok(restarted.runId);
     console.log("ok");
@@ -340,12 +343,13 @@ test("an interrupted tester run releases the ticket for a retry", () => {
   assert.equal(output, "ok");
 });
 
-test("expired tester leases are recovered during board refresh", () => {
+test("expired tester leases are released only by the lifecycle supervisor", () => {
   const output = run(`
     import assert from "node:assert/strict";
     import { DatabaseSync } from "node:sqlite";
     process.env.TESTER_TIMEOUT_MS = "1000";
     const db = await import(${JSON.stringify(databaseModule)});
+    const workflow = await import(${JSON.stringify(workflowModule)});
     const started = db.startTesterRun("FW-118", "agent-tester-1", "project-agent-harness");
     assert.ok(started.runId);
     const raw = new DatabaseSync(process.env.HARNESS_DB_PATH);
@@ -353,6 +357,11 @@ test("expired tester leases are recovered during board refresh", () => {
     raw.prepare("UPDATE agent_runs SET started_at = ? WHERE id = ?").run(old, started.runId);
     raw.prepare("UPDATE agent_leases SET expires_at = ? WHERE run_id = ?").run(old, started.runId);
     raw.close();
+    workflow.sweepAgentLifecycle();
+    const cancelling = db.listTasks("project-agent-harness").find((task) => task.id === "FW-118");
+    assert.equal(cancelling.status, "Testing");
+    assert.equal(cancelling.activeRunId, started.runId);
+    workflow.sweepAgentLifecycle();
     const recovered = db.listTasks("project-agent-harness").find((task) => task.id === "FW-118");
     assert.equal(recovered.status, "Review");
     assert.equal(recovered.activeRunId, null);

@@ -3,7 +3,7 @@ import { getProviderStatus } from "./providers.mjs";
 import { checkRuntime } from "./runtime-check.mjs";
 
 const projects = listProjects().filter((project) => project.status !== "archived");
-const requiredProviders = new Set(listAgents().filter((agent) => agent.status !== "offline").map((agent) => String(agent.provider)));
+const requiredProviders = new Set(listAgents().filter((agent) => agent.enabled).map((agent) => String(agent.provider)));
 const checks = projects.map((project) => ({
   projectId: project.id,
   name: project.name,

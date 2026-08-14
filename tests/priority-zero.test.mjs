@@ -44,6 +44,7 @@ test("only a valid active run can be completed", () => {
     const db = await import(${JSON.stringify(databaseModule)});
     const developer = db.claimNextTask("agent-developer-1", "FW-115", "project-agent-harness");
     assert.ok(developer.runId);
+    db.markAgentRunRunning(developer.runId);
     assert.throws(() => db.finishAgentRun(developer.runId, { status: "succeeded", nextStatus: "Done" }), /Ungültiger Folgestatus/);
     assert.equal(db.getAgentRun(developer.runId).status, "running");
     assert.ok(db.finishAgentRun(developer.runId, { status: "succeeded" }));

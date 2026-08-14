@@ -43,7 +43,7 @@ import {
   registerManagerDecision,
   runReadOnlyProjectAnalysis,
 } from "./manager-actions.mjs";
-import { advanceAutoProcess, cancelActiveRun, claimAndLaunchDeveloper, finishTesterAndContinue, resumeAutoProcesses, startTesterForTask } from "./workflow-orchestrator.mjs";
+import { advanceAutoProcess, cancelActiveRun, claimAndLaunchDeveloper, finishTesterAndContinue, resumeAutoProcesses, startLifecycleSupervisor, startTesterForTask } from "./workflow-orchestrator.mjs";
 import { getProviderStatus } from "./providers.mjs";
 import { checkRuntime } from "./runtime-check.mjs";
 
@@ -214,7 +214,7 @@ const server = createServer(async (request, response) => {
       if (payload.status !== "succeeded" && payload.status !== "failed") return json(response, 400, { error: "status must be succeeded or failed" });
       const run = getAgentRun(runId);
       if (!run) return json(response, 404, { error: "agent run not found" });
-      if (run.role !== "developer" || !["queued", "running"].includes(String(run.status)) || run.task?.activeRunId !== runId || run.task?.activeRunRole !== "developer") {
+      if (run.role !== "developer" || !["queued", "starting", "running", "cancelling"].includes(String(run.status)) || run.task?.activeRunId !== runId || run.task?.activeRunRole !== "developer") {
         return json(response, 409, { error: "agent run is not the active developer run for its ticket" });
       }
       try {
@@ -229,7 +229,7 @@ const server = createServer(async (request, response) => {
       const runId = decodeURIComponent(testerFinishMatch[1]);
       const run = getAgentRun(runId);
       if (!run) return json(response, 404, { error: "tester run not found" });
-      if (run.role !== "tester" || !["queued", "running"].includes(String(run.status)) || run.task?.activeRunId !== runId || run.task?.activeRunRole !== "tester") {
+      if (run.role !== "tester" || !["queued", "starting", "running", "cancelling"].includes(String(run.status)) || run.task?.activeRunId !== runId || run.task?.activeRunRole !== "tester") {
         return json(response, 409, { error: "tester run is not the active run for its ticket" });
       }
       const payload = await readJson(request);
@@ -311,6 +311,7 @@ const server = createServer(async (request, response) => {
 });
 
 server.listen(port, "127.0.0.1", () => {
+  startLifecycleSupervisor();
   console.log(`[harness-api] SQLite API listening on http://127.0.0.1:${port}`);
   setImmediate(() => {
     try {

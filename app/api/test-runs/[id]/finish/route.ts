@@ -8,7 +8,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
   const runId = decodeURIComponent(id);
   const run = getAgentRun(runId) as { role?: string; status?: string; task?: { activeRunId?: string | null; activeRunRole?: string | null } } | undefined;
   if (!run) return Response.json({ error: "tester run not found" }, { status: 404 });
-  if (run.role !== "tester" || !["queued", "running"].includes(String(run.status)) || run.task?.activeRunId !== runId || run.task?.activeRunRole !== "tester") {
+  if (run.role !== "tester" || !["queued", "starting", "running", "cancelling"].includes(String(run.status)) || run.task?.activeRunId !== runId || run.task?.activeRunRole !== "tester") {
     return Response.json({ error: "tester run is not the active run for its ticket" }, { status: 409 });
   }
   const payload = await request.json() as { status?: string };

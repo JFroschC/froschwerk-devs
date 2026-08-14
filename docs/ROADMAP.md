@@ -34,73 +34,196 @@ Abnahme:
 - Kein Runner kann ein Ticket außerhalb eines gültigen aktiven Runs bearbeiten.
 
 Verifiziert mit `npm.cmd run lint` und `npm.cmd test`: Typecheck, Produktions-Build
-und 54 Node-Tests sind erfolgreich.
+und 56 Node-Tests sind erfolgreich.
 
 ## Priorität 1 – Agent Lifecycle v2
 
 ### Zustandsmodell
 
-- [ ] verbindliche Run-Zustände definieren, zum Beispiel
+- [x] verbindliche Run-Zustände definieren:
   `queued`, `starting`, `running`, `cancelling`, `succeeded`, `failed`,
   `timed_out`, `cancelled` und `lost`
-- [ ] erlaubte Übergänge zentral validieren
-- [ ] technische Ursache getrennt vom fachlichen Ticketstatus speichern
-- [ ] `exitCode`, `signal`, `terminationReason` und relevante Zeitpunkte erfassen
+- [x] erlaubte Übergänge zentral validieren
+- [x] technische Ursache getrennt vom fachlichen Ticketstatus speichern
+- [x] `exitCode`, `signal`, `terminationReason` und relevante Zeitpunkte erfassen
 
 ### Heartbeat und Aktivität
 
-- [ ] `lastHeartbeatAt`, `lastActivityAt`, aktuelle Phase und optionalen Fortschritt
+- [x] `lastHeartbeatAt`, `lastActivityAt`, aktuelle Phase und optionalen Fortschritt
   am Run speichern
-- [ ] fehlgeschlagene Lease-Erneuerung im Runner behandeln
-- [ ] Agentenstatus aus aktiven Runs ableiten
-- [ ] konfiguriertes `enabled/disabled` von Laufzeitstatus trennen
+- [x] fehlgeschlagene Lease-Erneuerung im Runner behandeln
+- [x] Agentenstatus aus aktiven Runs ableiten
+- [x] konfiguriertes `enabled/disabled` von Laufzeitstatus trennen
 
 Die bestehende Lease-Erneuerung alle 30 Sekunden bleibt Grundlage und wird nicht neu
 erfunden.
 
+Schritt 1 abgeschlossen am 14. August 2026. Die zentrale Kapselung und Übergabe für
+weitere Agenten steht in [AGENT-LIFECYCLE.md](./AGENT-LIFECYCLE.md). Die folgenden
+beiden Abschnitte bilden Schritt 2; erst danach ist Prio 1 vollständig abgenommen.
+
 ### Supervisor und Recovery
 
-- [ ] periodischen, idempotenten Lifecycle-Sweeper einführen
-- [ ] Lease-Ablauf, fehlenden Prozess, Output-Inaktivität und Serverneustart getrennt
+- [x] periodischen, idempotenten Lifecycle-Sweeper einführen
+- [x] Lease-Ablauf, fehlenden Prozess, Output-Inaktivität und Serverneustart getrennt
   klassifizieren
-- [ ] vor Freigabe eines stale Tickets einen noch lebenden Prozess beenden
-- [ ] PID beziehungsweise Prozessidentität gegen Wiederverwendung absichern
-- [ ] Manager-Requests in dieselbe beobachtbare Lifecycle-Systematik einordnen
+- [x] vor Freigabe eines stale Tickets einen noch lebenden Prozess beenden
+- [x] PID beziehungsweise Prozessidentität gegen Wiederverwendung absichern
+- [x] Manager-Requests in dieselbe beobachtbare Lifecycle-Systematik einordnen
 
 ### Stop und Retry
 
-- [ ] Abbruch zunächst persistent als `cancelling` markieren
-- [ ] Runner kooperativ beenden und erst nach bestätigtem Prozessende freigeben
-- [ ] anschließend begrenzt auf erzwungenen Prozessbaum-Abbruch eskalieren
-- [ ] Retry immer als neuen Run anlegen; vorherigen Run unverändert als Auditspur behalten
-- [ ] Benutzerabbruch nicht auf technische Recovery-Grenzen anrechnen
+- [x] Abbruch zunächst persistent als `cancelling` markieren
+- [x] Runner kooperativ beenden und erst nach bestätigtem Prozessende freigeben
+- [x] anschließend begrenzt auf erzwungenen Prozessbaum-Abbruch eskalieren
+- [x] Retry immer als neuen Run anlegen; vorherigen Run unverändert als Auditspur behalten
+- [x] Benutzerabbruch nicht auf technische Recovery-Grenzen anrechnen
 
 Abnahme:
 
-- Jeder aktive Run besitzt einen aktuellen, sichtbaren Heartbeat.
-- Abbruch, Timeout, Prozessverlust und fachlicher Fehler sind eindeutig unterscheidbar.
-- Kein Ticket wird erneut gestartet, solange der alte Prozess noch schreiben kann.
-- Recovery ist nach Neustarts und bei wiederholter Ausführung idempotent.
+- [x] Jeder aktive Run besitzt einen aktuellen, sichtbaren Heartbeat.
+- [x] Abbruch, Timeout, Prozessverlust und fachlicher Fehler sind eindeutig unterscheidbar.
+- [x] Kein Ticket wird erneut gestartet, solange der alte Prozess noch schreiben kann.
+- [x] Recovery ist nach Neustarts und bei wiederholter Ausführung idempotent.
 
-## Priorität 2 – Agenten- und Run-Oberfläche
+Prio 1 abgeschlossen am 14. August 2026. Der Supervisor läuft im API-Server
+standardmäßig alle zehn Sekunden (`AGENT_LIFECYCLE_SWEEP_MS`). Er unterscheidet
+Lease-Ablauf, Start- und Output-Inaktivität, fehlenden Prozess, Server-Neustart
+und PID-Wiederverwendung. Bei unbekannter alter Prozessidentität bleibt ein Run
+sicher in `cancelling` und fordert manuelle Klärung an, statt ein möglicherweise
+schreibendes Ticket freizugeben.
+
+## Priorität 2 – Agenten-, Run- und Manager-Aktionssteuerung
+
+Prio 2 baut auf dem abgeschlossenen Lifecycle aus Prio 1 auf. Die Oberfläche darf
+Lifecycle-Daten nur anzeigen und Aktionen über die zentralen APIs auslösen; sie darf
+keine Zustandsübergänge oder Retry-Entscheidungen selbst ableiten. Polling bleibt
+zunächst der Synchronisationsmechanismus. SSE/WebSocket wird erst bei nachweislichem
+Betriebsbedarf bewertet.
+
+### Schritt 1 – Lauf- und Agenten-Transparenz
+
+Ziel: Ein laufender oder beendeter AgentRun ist ohne Terminal verständlich und mit
+seinen Requests, Testergebnissen und Ereignissen nachvollziehbar.
 
 - [ ] vorhandene `/api/agent-runs`-Route in den regelmäßigen UI-Sync aufnehmen
 - [ ] Agentenübersicht und Agenten-Detailseite erstellen
 - [ ] Run-Historie mit Zustand, Rolle, Provider, Modell, Versuch und Dauer anzeigen
-- [ ] PID, Lease-Ablauf, letzten Heartbeat und letzte Aktivität sichtbar machen
-- [ ] Request-Ausgabe, Zusammenfassung, Fehler und Testchecks anzeigen
-- [ ] Start, Stop und Retry mit verständlicher Bestätigung anbieten
+- [ ] PID, Prozessidentität, Lease-Ablauf, letzten Heartbeat und letzte Aktivität
+  sichtbar machen
+- [ ] aktuelle Phase, Fortschritt, technische Beendigungsursache, Exit-Code und Signal
+  verständlich darstellen
+- [ ] Request-Ausgabe, Zusammenfassung, Fehler und Testchecks am zugehörigen Run
+  anzeigen
 - [ ] Aktivitätsansicht für Task-Events und Run-Übergänge ergänzen
-- [ ] Polling zunächst weiterverwenden; SSE/WebSocket erst bei erkennbarem Bedarf ergänzen
+- [ ] leere, fehlende oder historisch unvollständige Daten nachvollziehbar kennzeichnen,
+  statt einen laufenden Zustand vorzutäuschen
+
+Abnahme Schritt 1:
+
+- Ein Entwickler- oder Tester-Run lässt sich vom Start bis zum Abschluss ohne Terminal
+  nachvollziehen.
+- Der Nutzer erkennt innerhalb der Oberfläche, ob ein Agent startet, arbeitet,
+  auf kooperative Beendigung wartet, hängt, verloren ging oder beendet wurde.
+- Die sichtbaren Werte entsprechen den in Prio 1 gespeicherten Lifecycle-Daten; das
+  UI erzeugt keine eigene Zustandslogik.
+
+### Schritt 2 – Sichere Run-Aktionen und Auditspur
+
+Ziel: Start, Stop und Retry sind verständlich bedienbar, bestätigen ihre Wirkung und
+erhalten die Integritätsregeln aus Prio 1 auch bei mehrfachen Klicks oder veralteter
+Oberfläche.
+
+- [ ] Start, Stop und Retry mit verständlicher, zustandsabhängiger Bestätigung anbieten
+- [ ] beim Stop den Zwischenzustand `cancelling`, den Grund und die laufende
+  Stop-Eskalation sichtbar halten; das Ticket darf bis zum Terminalzustand nicht als
+  erneut startbar erscheinen
+- [ ] Retry ausschließlich über einen neuen Run auslösen; vorherigen Run, Requests,
+  Logs, Testergebnis und Beendigungsursache unverändert als Auditspur behalten
+- [ ] UI-Aktionen gegen veraltete oder bereits terminale Runs serverseitig eindeutig
+  ablehnen und die Oberfläche anschließend synchronisieren
+- [ ] jede Benutzeraktion, Bestätigung, Ablehnung und resultierende Transition in der
+  Aktivitätsansicht nachvollziehbar machen
+- [ ] Fehlermeldungen für fehlende Berechtigung, Prozessschutz, Retry-Grenze und
+  nicht erfüllte Ticketvoraussetzungen verständlich anzeigen
+
+Abnahme Schritt 2:
+
+- Stop und Retry erzeugen eine vollständige Auditspur.
+- Kein Bedienablauf kann einen neuen Run starten, solange der alte Prozess noch
+  schreiben kann.
+- Nach Reload, doppeltem Klick oder paralleler UI-Synchronisierung bleibt genau ein
+  kanonischer Run-Zustand sichtbar.
+
+### Schritt 3 – Sichtbare und steuerbare Manager-Aktionen
+
+Ziel: Manager-Analysen, Planungen und bestätigte Aktionen erhalten dieselbe
+nachvollziehbare Bedienung wie AgentRuns – einschließlich sicherem Abbruch und
+eindeutigem Wiederholungsversuch.
+
+- [ ] Manager-Analysen, Planungen und Aktionen mit einem persistenten Laufstatus
+  versehen und mit Chat, Plan, Request und Audit-Events verknüpfen
+- [ ] Fortschritt laufender Manager-Aktionen sowie verständliche Fehlerdetails anzeigen
+- [ ] Manager-Aktionen sicher abbrechen und fehlgeschlagene Aktionen gezielt als neuen
+  Versuch wiederholen können
+- [ ] bei Abbruch verhindern, dass ein teilweise ausgeführter Aktionsbatch unbemerkt
+  zurückbleibt; bereits ausgeführte und noch ausstehende Teilaktionen müssen eindeutig
+  getrennt dokumentiert sein
+- [ ] Bestätigungsgrenze, Eingabeparameter, erzeugte Plan-/Ticketreferenzen und
+  Ergebnis jedes Manager-Versuchs persistent verknüpfen
+- [ ] Wiederholung nie am bestehenden Versuch fortschreiben, sondern als neuen,
+  verknüpften Versuch mit unveränderter Auditspur anlegen
+
+Abnahme Schritt 3 und Prio 2:
+
+- Auch Manager-Aktionen sind vom Start bis zum Ergebnis sichtbar, abbrechbar und
+  eindeutig einem neuen Wiederholungsversuch zuzuordnen.
+- Ein abgebrochener oder fehlerhafter Aktionsbatch lässt keine unklaren Teiländerungen
+  zurück.
+- Alle sichtbaren Run-, Request- und Managerzustände werden weiterhin per Polling
+  konsistent aktualisiert.
+
+## Priorität 3 – Freigabe-Gates und Agent-Adapter
+
+### Freigabe-Gates
+
+- [ ] Aktionen in Risikoklassen einteilen, mindestens `read_only`, `workspace_write`,
+  `process_control`, `destructive`, `external` und `production`
+- [ ] Freigaben serverseitig erzwingen; eine reine Bestätigung im Frontend reicht nicht
+- [ ] ausstehende Freigaben mit Projekt, Aktion, Parametern, anfragender Rolle,
+  Freigebendem, Zeitstempel und Status persistent speichern
+- [ ] geänderte Aktionsparameter oder Pläne lassen eine bestehende Freigabe verfallen
+- [ ] projektbezogene, widerrufbare Automatikregeln nur für ausdrücklich erlaubte
+  Aktionsklassen vorsehen
+- [ ] Ablehnung, Ablauf und Ausführung vollständig im Auditlog dokumentieren
+
+### Gemeinsames Agent-Adapter-Interface
+
+Ein Agent-Adapter ist die interne, providerneutrale Grenze zwischen Harness und lokaler
+CLI. Manager, Entwickler und Tester beschreiben weiterhin ihre jeweilige fachliche
+Aufgabe. Der Adapter kapselt dagegen die technischen Unterschiede von Codex und Claude,
+damit Lifecycle, Abbruch und Ergebnisauswertung nicht in jedem Runner anders umgesetzt
+werden.
+
+- [ ] gemeinsamen Vertrag für Start, Aktivitätsmeldung, Ausgabe, Abbruch, Prozessende,
+  normalisiertes Ergebnis und Usage-Daten definieren
+- [ ] Codex- und Claude-spezifische Argumente, Umgebungsvariablen und Output-Parser in
+  getrennten Provider-Adaptern kapseln
+- [ ] Manager-, Entwickler- und Tester-Runner schrittweise auf denselben Adapter und
+  dieselben Lifecycle-Regeln umstellen
+- [ ] rollenbezogene Prompts, Berechtigungen und Ergebnisformate außerhalb des
+  Provider-Adapters getrennt halten
+- [ ] Vertrags- und Fehlerszenarien für beide Provider testen, bevor alte Runnerpfade
+  entfernt werden
 
 Abnahme:
 
-- Ein Run lässt sich vom Start bis zum Abschluss ohne Terminal nachvollziehen.
-- Der Nutzer erkennt innerhalb der Oberfläche, ob ein Agent arbeitet, wartet, hängt
-  oder beendet wurde.
-- Stop und Retry erzeugen eine vollständige Auditspur.
+- Keine riskante Aktion kann allein durch Umgehung der Oberfläche ausgeführt werden.
+- Jede Freigabe ist eindeutig, zeitlich und inhaltlich an genau eine Aktion gebunden.
+- Codex und Claude liefern für alle Rollen dieselben normalisierten Lifecycle-Ereignisse.
+- Ein neuer Provider benötigt einen neuen Adapter, aber keine Kopie aller drei Runner.
 
-## Priorität 3 – Artefakte und Qualität
+## Priorität 4 – Artefakte und Qualität
 
 - [ ] Services und API für die vorhandene `artifacts`-Tabelle implementieren
 - [ ] Diffs, Logs und Screenshots projekt- und runbezogen speichern
@@ -109,7 +232,7 @@ Abnahme:
 - [ ] End-to-End-Tests für Start, Heartbeat, Cancel, Restart und Recovery ergänzen
 - [ ] SQLite-Backup, Restore und versionierte Migrationen einführen
 
-## Priorität 4 – Sichere Parallelisierung
+## Priorität 5 – Sichere Parallelisierung
 
 Erst nach dem Lifecycle-Meilenstein:
 
@@ -123,13 +246,48 @@ Die Datenbasis erlaubt bereits mehrere manuelle Claims. Der automatische Schedul
 wartet derzeit jedoch bei jedem aktiven Run und startet ausschließlich den
 Standardentwickler.
 
-## Priorität 5 – Integration und Betrieb
+## Priorität 6 – Integration und Betrieb
 
 - [ ] lokalen MCP-Server auf Basis des vorhandenen Tool-Vertrags implementieren
 - [ ] MCP-Berechtigungen rollen- und projektbezogen validieren
 - [ ] optionalen Zugriffsschutz für Netzwerkbetrieb entwerfen
 - [ ] Live-Streaming nur bei echtem Betriebsbedarf ergänzen
 - [ ] Betriebs- und Restore-Dokumentation vervollständigen
+
+## Priorität 7 – Board-, Ticket- und Mira-UI vervollständigen
+
+### Mira-Chatfenster stabilisieren
+
+- [ ] Größenverwaltung von Chatfenster und internem Planbereich nachvollziehbar trennen
+- [ ] gespeicherte Größen beim Laden validieren und ungültige oder veraltete Werte auf
+  sichere Standardwerte zurücksetzen
+- [ ] Größen bei Drag, Browser-Resize und Wechsel des Responsive-Breakpoints zuverlässig
+  auf den sichtbaren Viewport begrenzen
+- [ ] Resize bei `pointerup`, `pointercancel` und Fokusverlust sicher beenden
+- [ ] verhindern, dass Kopfbereich, Eingabefeld oder Größen-Griff außerhalb des
+  sichtbaren Bereichs geraten
+- [ ] Zurücksetzen auf Standardgröße und Wiederherstellung nach einem Reload testen
+- [ ] Interaktionstests für Resize, Reload und Desktop-/Mobilwechsel ergänzen
+
+### Allgemeine UI-Funktionen
+
+- [ ] Suche über Tickets, Kommentare, Agenten und Runs implementieren
+- [ ] Boardfilter nach Status, Priorität, Agent, Provider und Projekt ergänzen
+- [ ] Benachrichtigungen für Fehler, Blockaden, Testergebnisse und abgeschlossene Runs
+  anzeigen
+- [ ] Ticketdetail zuverlässig schließen und die Auswahl zurücksetzen
+- [ ] funktionslose Spaltenmenüs entweder sinnvoll verdrahten oder entfernen
+- [ ] Ticket-Abhängigkeiten im Detail anzeigen und bearbeiten
+- [ ] eigene Kommentare bearbeiten und löschen können
+
+Abnahme:
+
+- Das Mira-Chatfenster bleibt nach Ziehen, Reload und Viewportwechsel vollständig
+  bedienbar und lässt sich immer auf eine gültige Standardgröße zurücksetzen.
+- Alle sichtbaren Bedienelemente besitzen eine nachvollziehbare Funktion oder werden
+  nicht angezeigt.
+- Tickets und relevante Laufereignisse lassen sich ohne manuelles Durchsuchen aller
+  Spalten auffinden und eingrenzen.
 
 ## Nicht Teil des nächsten Meilensteins
 

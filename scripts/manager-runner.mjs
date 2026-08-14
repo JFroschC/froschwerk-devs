@@ -5,7 +5,7 @@ import { getAgent } from "../db/local.ts";
 import { providerDefinition } from "./providers.mjs";
 import { checkRuntime } from "./runtime-check.mjs";
 import { extractUsage } from "./request-usage.mjs";
-import { finishAgentRequest, startAgentRequest } from "../db/local.ts";
+import { finishAgentRequest, reportAgentRequestActivity, startAgentRequest } from "../db/local.ts";
 import { commandInvocation, runtimeEnvironment } from "./runtime-env.mjs";
 
 const codexHome = process.env.CODEX_HOME ?? join(process.env.USERPROFILE ?? process.env.HOME ?? process.cwd(), ".codex");
@@ -16,7 +16,7 @@ function codexWorkspaceArgs(workspace) {
   return existsSync(join(workspace, ".git")) ? [] : ["--skip-git-repo-check"];
 }
 
-function runCli(command, args, options, input, timeoutMs = Number(process.env.MANAGER_TIMEOUT_MS ?? 180000)) {
+function runCli(command, args, options, input, timeoutMs = Number(process.env.MANAGER_TIMEOUT_MS ?? 180000), onActivity = () => {}) {
   return new Promise((resolvePromise, reject) => {
     const startedAt = Date.now();
     const timeoutSeconds = Math.round(timeoutMs / 1000);
@@ -26,12 +26,13 @@ function runCli(command, args, options, input, timeoutMs = Number(process.env.MA
     let stderr = "";
     let settled = false;
     const heartbeat = setInterval(() => {
+      onActivity("waiting_for_provider");
       console.log(`[mira] läuft seit ${Math.round((Date.now() - startedAt) / 1000)}s (Timeout ${timeoutSeconds}s)`);
     }, 15_000);
     const cleanup = () => { clearTimeout(timeout); clearInterval(heartbeat); };
     console.log(`[mira] Anfrage gestartet (Timeout ${timeoutSeconds}s)`);
-    child.stdout.on("data", (chunk) => { stdout += chunk; });
-    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.stdout.on("data", (chunk) => { stdout += chunk; onActivity("provider_output"); });
+    child.stderr.on("data", (chunk) => { stderr += chunk; onActivity("provider_output"); });
     const timeout = setTimeout(() => {
       if (settled) return;
       settled = true;
@@ -116,7 +117,8 @@ ${prompt}`;
   if (provider === "claude") delete cliEnv.ANTHROPIC_API_KEY;
   const request = startAgentRequest({ projectId: context.projectId, agentId: manager?.id ?? "agent-manager", role: "manager", provider, model: provider === "codex" ? managerCodexModel : "claude-subscription", command: `${definition.command} ${args.join(" ")}`, prompt: managerPrompt });
   try {
-    const result = await runCli(definition.command, args, { cwd: workspace, env: cliEnv, windowsHide: true }, managerPrompt);
+    reportAgentRequestActivity(request.requestId, "manager_provider");
+    const result = await runCli(definition.command, args, { cwd: workspace, env: cliEnv, windowsHide: true }, managerPrompt, undefined, (phase) => reportAgentRequestActivity(request.requestId, phase));
     const raw = `${result.stdout}\n${result.stderr}`;
     const usage = extractUsage(raw);
     finishAgentRequest(request.requestId, { status: "succeeded", response: result.stdout, ...usage, startedAt: request.startedAt });

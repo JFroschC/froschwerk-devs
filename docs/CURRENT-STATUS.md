@@ -11,7 +11,7 @@ historische Entwürfe und Audits liegen unter [archive/](./archive/README.md).
 - Git-Baseline: Initial-Commit `cb176550bc70463e44c75c950af04467db312f46`
   vom 14.08.2026
 - Node.js: `>=22.13.0`
-- `npm.cmd test`: Typecheck, Build erfolgreich, 54 von 54 Tests bestanden
+- `npm.cmd test`: Typecheck, Build erfolgreich, 58 von 58 Tests bestanden
 - `npm.cmd run lint`: erfolgreich
 - `npm.cmd run typecheck`: erfolgreich
 - die Dokumentationskonsolidierung dieses Stands ist nach dem Initial-Commit entstanden
@@ -58,10 +58,23 @@ sequenziell. Ein aktiver Run blockiert den Start eines weiteren automatischen Ru
 - vollständiges Projekt-Testgate vor `Review`
 - zentrale Tester-Suite mit TestReport und Folgeaufgaben bei Produktfehlern
 
-Die vorhandene Lease-Erneuerung ist eine technische Heartbeat-Basis, aber noch kein
-vollständiges Lifecycle-Management. Es fehlen insbesondere explizite
-Heartbeat-/Aktivitätszeitpunkte, ein dauerhafter Supervisor und klar getrennte Zustände
-für Start, Abbruch, Timeout und verlorene Prozesse.
+Lifecycle-Schritt 1 und 2 sind umgesetzt: Der verbindliche Vertrag liegt in
+[AGENT-LIFECYCLE.md](./AGENT-LIFECYCLE.md). AgentRuns verwenden jetzt die Zustände
+`queued`, `starting`, `running`, `cancelling`, `succeeded`, `failed`, `timed_out`,
+`cancelled` und `lost`; Transitionen werden zentral validiert. Runs speichern
+Heartbeat, Aktivität, Phase, Fortschritt, Exit-Code, Signal und technische
+Beendigungsursache. Entwickler- und Tester-Runner melden diese Daten und beenden sich
+ohne Abschluss-Schreibzugriff bei verlorener Lease. Die Agenten-Konfiguration
+`enabled/disabled` ist vom aus aktiven Runs abgeleiteten Laufzeitstatus getrennt.
+Der API-Server startet zusätzlich einen idempotenten Lifecycle-Supervisor. Dieser
+ordnet Lease-Ablauf, Start-/Output-Inaktivität, fehlenden Prozess und
+Serverneustart getrennt ein, markiert Abbrüche zunächst persistent als `cancelling`
+und gibt das Ticket erst nach bestätigtem Prozessende frei. Die Kombination aus PID
+und Startzeit schützt vor PID-Wiederverwendung; nicht verifizierbare Altprozesse
+bleiben bewusst gesperrt. Nach der kooperativen Runner-Phase eskaliert der Supervisor
+begrenzt auf einen Prozessbaum-Abbruch. Jeder Retry erzeugt weiterhin einen neuen Run;
+Benutzerabbrüche erhöhen keine Recovery- oder Retry-Zähler. Manager-Anfragen speichern
+jetzt ebenfalls aktuelle Aktivität und Phase in `agent_requests`.
 
 ### Oberfläche
 
@@ -89,9 +102,7 @@ Felder, und Start-/Finish-Grenzen prüfen Rolle, aktiven Run und Folgestatus. De
 direkte `--task`-Modus erfordert einen passenden aktiven `--run-id`; ein Testerprozess
 prüft ebenfalls seine Bindung an den aktiven Tester-Run.
 
-1. **Agentenstatus:** `agents.status` ist derzeit überwiegend Konfiguration und wird
-   nicht zuverlässig aus aktiven Runs abgeleitet.
-2. **Artefakte:** Die Tabelle existiert, aber es gibt noch keinen Schreib-/Lese-Service
+1. **Artefakte:** Die Tabelle existiert, aber es gibt noch keinen Schreib-/Lese-Service
    und keine UI. Die lokale Datenbank enthielt beim letzten Audit null Artefakte.
 
 Die verbleibende priorisierte Arbeit steht in [ROADMAP.md](./ROADMAP.md).

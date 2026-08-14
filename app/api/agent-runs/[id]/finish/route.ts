@@ -13,7 +13,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
   if (payload.status !== "succeeded" && payload.status !== "failed") return Response.json({ error: "status must be succeeded or failed" }, { status: 400 });
   const run = getAgentRun(id) as { role?: string; status?: string; task?: { activeRunId?: string | null; activeRunRole?: string | null } } | undefined;
   if (!run) return Response.json({ error: "agent run not found" }, { status: 404 });
-  if (run.role !== "developer" || !["queued", "running"].includes(String(run.status)) || run.task?.activeRunId !== id || run.task?.activeRunRole !== "developer") {
+  if (run.role !== "developer" || !["queued", "starting", "running", "cancelling"].includes(String(run.status)) || run.task?.activeRunId !== id || run.task?.activeRunRole !== "developer") {
     return Response.json({ error: "agent run is not the active developer run for its ticket" }, { status: 409 });
   }
   try {

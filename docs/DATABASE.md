@@ -42,8 +42,8 @@ Ableitung aus aktiven Runs ist Teil des nächsten Lifecycle-Meilensteins.
 
 ### Runs, Requests und Ergebnisse
 
-- `agent_runs`: Rolle, Zustand, Versuch, Ein-/Ausgabe, Zusammenfassung, Fehler, PID
-  und Zeitpunkte
+- `agent_runs`: Rolle, Zustand, Versuch, Ein-/Ausgabe, Zusammenfassung, Fehler, PID,
+  Prozessidentität, Heartbeat, Aktivität, Phase, Beendigungsursache und Zeitpunkte
 - `agent_leases`: exklusive Reservierung eines Tickets mit Ablaufzeit
 - `agent_requests`: einzelne Provider- oder lokale Testanfragen einschließlich Modell,
   Kommando, Dauer, Tokenwerten, Vorschauen und Fehlern
@@ -90,10 +90,21 @@ derzeit sequenziell und wartet, sobald irgendein Run des Projekts aktiv ist.
 - Tester-Recovery ist über `TESTER_RECOVERY_LIMIT` begrenzt
 - User-Cancel soll keine technische Retry-Grenze verbrauchen
 
-Die Lease-Erneuerung ist die bestehende Heartbeat-Basis. Noch fehlen ein explizites
-`last_heartbeat_at`, Aktivitäts- und Phaseninformationen sowie ein periodischer
-Supervisor. Außerdem muss Recovery künftig einen möglicherweise noch lebenden Prozess
-beenden, bevor das Ticket erneut freigegeben wird.
+Die Lease-Erneuerung aktualisiert `last_heartbeat_at`; Runner melden zusätzlich
+`last_activity_at`, Phase und Fortschritt. Der API-Server startet einen idempotenten
+Supervisor mit standardmäßig zehn Sekunden Intervall. Dieser klassifiziert
+Lease-Ablauf, Start-/Output-Inaktivität, fehlenden Prozess und Neustart getrennt.
+Ein Ticket wird erst freigegeben, nachdem der zugehörige Prozess beendet ist.
+`process_identity` kombiniert PID und Prozessstartzeit, damit eine wiederverwendete PID
+nicht versehentlich beendet wird. Ist eine alte PID nicht verifizierbar, bleibt der Run
+sicher in `cancelling` und braucht manuelle Klärung.
+
+Ein Benutzerabbruch setzt zunächst `cancelling` samt Zeitstempel. Der Runner beendet
+seinen Provider kooperativ; nach `AGENT_CANCEL_GRACE_MS` eskaliert der Supervisor
+begrenzt auf den Prozessbaum-Abbruch. Erst danach wird der Run `cancelled` und das
+Ticket erneut startbar. Ein Benutzerabbruch erhöht weder Entwickler-Retry noch
+Tester-Recovery. Manager-Anfragen verwenden dieselben sichtbaren Aktivitätsfelder
+`last_activity_at` und `current_phase` in `agent_requests`.
 
 ## Statusmodelle
 
@@ -108,9 +119,9 @@ Fehlerpfade:
 - `Changes Requested → In Progress`
 - `Blocked → Ready` nach bewusster Freigabe
 
-AgentRuns verwenden derzeit hauptsächlich
-`running`, `succeeded`, `failed` und `blocked`. Ein vollständiger
-Run-Zustandsautomat mit Start-, Cancel-, Timeout- und Lost-Zuständen ist noch offen.
+AgentRuns verwenden `queued`, `starting`, `running`, `cancelling`, `succeeded`,
+`failed`, `timed_out`, `cancelled` und `lost`. Gültige Übergänge sind zentral in
+`db/agent-lifecycle.ts` definiert.
 
 ## API-Überblick
 
@@ -153,8 +164,6 @@ Run-Zustandsautomat mit Start-, Cancel-, Timeout- und Lost-Zuständen ist noch o
 ## Offene Datenbankarbeit
 
 - versionierte Migrationen einführen
-- Lifecycle-Zeitpunkte und Zustandsautomat ergänzen
-- Finish-/Cancel-Transitionen rollenbasiert validieren
 - Artefakt-Services und API implementieren
 - Backup und Restore ergänzen
 

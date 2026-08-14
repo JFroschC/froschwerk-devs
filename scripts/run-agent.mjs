@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { addComment, claimNextTask, finishAgentRun, getAgent, getAgentRun, getProject, listTasks, renewAgentRunLease } from "../db/local.ts";
+import { addComment, claimNextTask, finalizeAgentRunCancellation, finishAgentRun, getAgent, getAgentRun, getProject, isAgentRunCancellationRequested, listTasks, markAgentRunRunning, renewAgentRunLease, reportAgentRunActivity } from "../db/local.ts";
 import { providerDefinition } from "./providers.mjs";
 import { extractUsage } from "./request-usage.mjs";
 import { finishAgentRequest, startAgentRequest } from "../db/local.ts";
@@ -44,7 +44,7 @@ if (taskId && !requestedRunId) throw new Error("--run-id ist bei einem direkten 
 if (task && requestedRunId) {
   const activeRun = getAgentRun(requestedRunId);
   if (!activeRun || activeRun.role !== "developer" || activeRun.agentId !== agentId
-    || activeRun.taskId !== task.id || !["queued", "running"].includes(String(activeRun.status))
+    || activeRun.taskId !== task.id || !["queued", "starting", "running", "cancelling"].includes(String(activeRun.status))
     || task.activeRunId !== requestedRunId || task.activeRunRole !== "developer") {
     throw new Error(`Run ${requestedRunId} ist nicht der gültige aktive Entwickler-Lauf für ${task.id}`);
   }
@@ -122,9 +122,8 @@ let receivedAgentOutput = false;
 let timeoutReason = "";
 let developerCommentPublished = false;
 const codexTurnTracker = createCodexTurnTracker();
-const leaseHeartbeat = claim.runId ? setInterval(() => renewAgentRunLease(claim.runId), 30_000) : undefined;
-leaseHeartbeat?.unref();
-if (claim.runId) renewAgentRunLease(claim.runId);
+let leaseOwnershipLost = false;
+let cancellationRequested = false;
 function publishDeveloperComment(outcome, output = stdout, errors = stderr, details = "") {
   if (developerCommentPublished) return;
   developerCommentPublished = true;
@@ -157,6 +156,35 @@ function terminateDeveloperProcess(force = false) {
   }
 }
 
+function renewLeaseOwnership() {
+  if (!claim.runId || leaseOwnershipLost) return;
+  const renewal = renewAgentRunLease(claim.runId);
+  if (!renewal.renewed) {
+    leaseOwnershipLost = true;
+    console.error(`[agent-runner] Lease für ${claim.runId} konnte nicht erneuert werden; der Runner beendet seinen Prozess und schreibt keinen Abschluss mehr.`);
+    terminateDeveloperProcess();
+    setTimeout(() => terminateDeveloperProcess(true), 5_000).unref();
+  } else if (renewal.cancellationRequested) observeCancellation();
+}
+
+function observeCancellation() {
+  if (!claim.runId || cancellationRequested || !isAgentRunCancellationRequested(claim.runId)) return;
+  cancellationRequested = true;
+  console.log(`[agent-runner] Abbruch für ${claim.runId} bestätigt; beende den Provider kooperativ.`);
+  terminateDeveloperProcess();
+  setTimeout(() => terminateDeveloperProcess(true), 15_000).unref();
+}
+
+if (claim.runId) {
+  markAgentRunRunning(claim.runId);
+  reportAgentRunActivity(claim.runId, { phase: "agent_cli", progress: 0 });
+  renewLeaseOwnership();
+}
+const leaseHeartbeat = claim.runId ? setInterval(renewLeaseOwnership, 30_000) : undefined;
+leaseHeartbeat?.unref();
+const cancellationWatch = claim.runId ? setInterval(observeCancellation, 1_000) : undefined;
+cancellationWatch?.unref();
+
 function configuredTimeout(name, fallback) {
   const value = Number(process.env[name] ?? fallback);
   return Number.isFinite(value) && value > 0 ? value : fallback;
@@ -184,6 +212,7 @@ function runDeveloperProjectTestGate() {
   });
 
   return new Promise((resolve) => {
+    if (claim.runId) reportAgentRunActivity(claim.runId, { phase: "project_test_gate", progress: 85 });
     console.log(`[agent-runner] Starte vollständiges Entwickler-Übergabegate: ${command}`);
     const gate = spawn(command, { cwd: workspace, env: runtimeEnvironment(workspace), shell: process.platform === "win32", stdio: ["ignore", "pipe", "pipe"], windowsHide: false });
     const idleLimit = configuredTimeout("DEVELOPER_PROJECT_TEST_IDLE_TIMEOUT_MS", configuredTimeout("PROJECT_TEST_IDLE_TIMEOUT_MS", 60_000));
@@ -208,6 +237,7 @@ function runDeveloperProjectTestGate() {
       clearInterval(watchdog);
       const logs = `${stdout}\n${stderr}`.trim();
       finishAgentRequest(gateRequest.requestId, { status: status === "succeeded" ? "succeeded" : status === "blocked" ? "blocked" : "failed", response: logs, error, startedAt });
+      console.log(`[agent-runner] Entwickler-Gate beendet: ${status}`);
       resolve({ status, command, logs, error });
     };
     const triggerTimeout = (reason) => {
@@ -219,8 +249,8 @@ function runDeveloperProjectTestGate() {
       setTimeout(() => complete("failed", timeoutReason), 5_000).unref();
     };
 
-    gate.stdout.on("data", (chunk) => { stdout += chunk; lastActivity = Date.now(); process.stdout.write(chunk); });
-    gate.stderr.on("data", (chunk) => { stderr += chunk; lastActivity = Date.now(); process.stderr.write(chunk); });
+    gate.stdout.on("data", (chunk) => { stdout += chunk; lastActivity = Date.now(); if (claim.runId) reportAgentRunActivity(claim.runId, { phase: "project_test_gate", progress: 90 }); process.stdout.write(chunk); });
+    gate.stderr.on("data", (chunk) => { stderr += chunk; lastActivity = Date.now(); if (claim.runId) reportAgentRunActivity(claim.runId, { phase: "project_test_gate", progress: 90 }); process.stderr.write(chunk); });
     gate.on("error", (error) => complete(classifyProjectTestResult({ spawnError: true }), error.message));
     gate.on("close", (code) => complete(classifyProjectTestResult({ code, timedOut }), timedOut ? timeoutReason : code === 0 ? undefined : `Testbefehl exit code ${code}`));
     const heartbeat = setInterval(() => console.log(`[agent-runner] Entwickler-Gate läuft, letzte Testausgabe vor ${Math.round((Date.now() - lastActivity) / 1000)}s`), 15_000);
@@ -245,6 +275,7 @@ function scheduleInactivityTimeout() {
 }
 function recordAgentOutput() {
   receivedAgentOutput = true;
+  if (claim.runId) reportAgentRunActivity(claim.runId, { phase: "agent_cli", progress: 50 });
   scheduleInactivityTimeout();
 }
 scheduleInactivityTimeout();
@@ -261,12 +292,29 @@ child.stdout.on("data", (chunk) => {
   recordAgentOutput();
   if (provider === "codex" && codexTurnTracker.write(chunk)) {
     console.log("[agent-runner] Codex-Turn abgeschlossen; übernehme das Ergebnis ins Board.");
-    void finalizeDeveloper(0, undefined, true);
+    scheduleDeveloperFinalization(0, undefined, true);
   }
 });
 child.stderr.on("data", (chunk) => { stderr += chunk; process.stderr.write(chunk); recordAgentOutput(); });
+// A provider may exit immediately after emitting its final event. Ending a
+// closed stdin pipe is normal in that case and must not crash the harness.
+child.stdin.on("error", (error) => {
+  if (error?.code !== "EPIPE") console.error("[agent-runner] Eingabe an Provider fehlgeschlagen", error);
+});
 child.stdin.end(prompt);
 let finalized = false;
+
+function scheduleDeveloperFinalization(code, spawnError, completedByTurnEvent = false, signal) {
+  // Node may otherwise exit directly after a very fast child process closes,
+  // before the asynchronous project gate has persisted the terminal state.
+  const keepAlive = setInterval(() => {}, 1_000);
+  void finalizeDeveloper(code, spawnError, completedByTurnEvent, signal)
+    .catch((error) => {
+      console.error("[agent-runner] Abschluss des Entwicklerlaufs fehlgeschlagen", error);
+      process.exitCode = 1;
+    })
+    .finally(() => clearInterval(keepAlive));
+}
 
 async function requestAutoAdvance() {
   const project = getProject(claim.task.projectId);
@@ -283,17 +331,31 @@ async function requestAutoAdvance() {
   }
 }
 
-async function finalizeDeveloper(code, spawnError, completedByTurnEvent = false) {
+async function finalizeDeveloper(code, spawnError, completedByTurnEvent = false, signal) {
   if (finalized) return;
   finalized = true;
   clearTimeout(inactivityTimeout);
   clearTimeout(maxRunTimeout);
   const effectiveCode = spawnError ? 1 : code ?? 1;
+  if (leaseOwnershipLost) {
+    clearInterval(leaseHeartbeat);
+    clearInterval(cancellationWatch);
+    process.exitCode = 1;
+    return;
+  }
   const storedRun = claim.runId ? getAgentRun(claim.runId) : undefined;
-  if (storedRun && !["queued", "running"].includes(String(storedRun.status))) {
+  if (storedRun && !["queued", "starting", "running", "cancelling"].includes(String(storedRun.status))) {
     clearInterval(leaseHeartbeat);
     console.log(`[agent-runner] ${claim.task.id}: Lauf wurde bereits extern beendet (${storedRun.error ?? storedRun.status}); keine automatische Fortsetzung.`);
     process.exitCode = effectiveCode;
+    return;
+  }
+  if (cancellationRequested || storedRun?.status === "cancelling") {
+    finishAgentRequest(request.requestId, { status: "cancelled", response: stdout, error: "USER_CANCELLED", startedAt: request.startedAt });
+    if (claim.runId) finalizeAgentRunCancellation(claim.runId, { terminationReason: "cooperative_cancelled" });
+    clearInterval(leaseHeartbeat);
+    clearInterval(cancellationWatch);
+    process.exitCode = 0;
     return;
   }
   if (completedByTurnEvent) {
@@ -305,6 +367,7 @@ async function finalizeDeveloper(code, spawnError, completedByTurnEvent = false)
     ? await runDeveloperProjectTestGate()
     : { status: "skipped", command: "", logs: "", error: undefined };
   const gatePassed = gateResult.status === "succeeded" || gateResult.status === "skipped";
+  console.log(`[agent-runner] Entwickler-Gate ausgewertet: ${gateResult.status}`);
   const developerSucceeded = cliSucceeded && gatePassed;
   const gateDetails = gateResult.status === "succeeded"
     ? `Entwickler-Übergabegate bestanden: ${gateResult.command}`
@@ -318,15 +381,20 @@ async function finalizeDeveloper(code, spawnError, completedByTurnEvent = false)
   const cliError = spawnError?.message ?? (provider === "codex" ? codexExitDiagnostic(effectiveCode, stderr) : `Exit code ${effectiveCode}`);
   finishAgentRequest(request.requestId, { status: timedOut ? "timeout" : effectiveCode === 0 ? "succeeded" : "failed", response: stdout, error: timedOut ? `REQUEST_TIMEOUT: ${timeoutReason}` : effectiveCode === 0 ? undefined : cliError, ...usage, startedAt: request.startedAt });
   clearInterval(leaseHeartbeat);
+  clearInterval(cancellationWatch);
   let finishedTask;
   if (claim.runId) {
     const gateError = gatePassed ? undefined : `DEVELOPER_PROJECT_TEST_GATE_FAILED: ${gateResult.error ?? projectTestFailureExcerpt(gateResult.logs)}`;
     finishedTask = finishAgentRun(claim.runId, {
-      status: developerSucceeded ? "succeeded" : "failed",
+      status: developerSucceeded ? "succeeded" : timedOut ? "timed_out" : "failed",
       summary: developerSucceeded ? `${definition.label} beendet; vollständiges Projekt-Testgate bestanden.` : cliSucceeded ? "Entwickler-Übergabegate fehlgeschlagen; Ticket bleibt beim Entwickler." : timedOut ? `${definition.label} wurde wegen Inaktivität abgebrochen.` : `${definition.label} endete mit Exit-Code ${effectiveCode}.`,
       error: developerSucceeded ? undefined : gateError ?? (timedOut ? `REQUEST_TIMEOUT: ${timeoutReason}` : cliError),
       nextStatus: developerSucceeded ? "Review" : "Ready",
+      exitCode: code ?? null,
+      signal: signal ?? null,
+      terminationReason: developerSucceeded ? "completed" : timedOut ? "timeout" : spawnError ? "spawn_error" : "process_exit",
     });
+    console.log(`[agent-runner] Entwickler-Run finalisiert: ${finishedTask?.status ?? "unbekannt"}`);
   }
   if (shouldAutoStartTester({ developerSucceeded, taskInReview: finishedTask?.status === "Review", autoProcessEnabled: finishedTask ? getProject(finishedTask.projectId)?.autoProcessEnabled : false }) || (finishedTask?.status === "Ready" && getProject(finishedTask.projectId)?.autoProcessEnabled)) {
     try { await requestAutoAdvance(); } catch (error) { console.error("[agent-runner] Autoprozess konnte nicht fortgesetzt werden", error); }
@@ -334,5 +402,5 @@ async function finalizeDeveloper(code, spawnError, completedByTurnEvent = false)
   process.exitCode = developerSucceeded ? 0 : effectiveCode || 1;
 }
 
-child.on("error", (error) => { void finalizeDeveloper(undefined, error); });
-child.on("close", (code) => { void finalizeDeveloper(code); });
+child.on("error", (error) => { scheduleDeveloperFinalization(undefined, error); });
+child.on("close", (code, signal) => { scheduleDeveloperFinalization(code, undefined, false, signal); });
