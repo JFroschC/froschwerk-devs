@@ -97,13 +97,15 @@ Jede schreibende Aktion erzeugt einen Eintrag in `task_events`.
 
 ## Bekannte Lücken vor dem MCP-Server
 
-1. Der JSON-Schema-Vertrag akzeptiert derzeit nur Ticket-IDs mit `FW-`-Präfix.
-   Reale Projekte verwenden auch Präfixe wie `FBT-`.
-2. Der Übergangsgraph ist eingeschränkt, aber noch nicht vollständig rollenbezogen
+1. Der Übergangsgraph ist eingeschränkt, aber noch nicht vollständig rollenbezogen
    autorisiert.
-3. Ein Agent darf einen angegebenen `runId` noch nicht durchgängig gegen das aktive
+2. Ein Agent darf einen angegebenen `runId` noch nicht durchgängig gegen das aktive
    Ticket und seine Rolle validieren.
-4. Der Netzwerk-/Transportadapter und seine lokale Zugriffskontrolle fehlen.
+3. Der Netzwerk-/Transportadapter und seine lokale Zugriffskontrolle fehlen.
+
+Der Ticket-Identifier akzeptiert projektunabhängige Großbuchstaben-, Ziffern-,
+Unterstrich- und Bindestrich-Präfixe, daher beispielsweise sowohl `FW-115` als auch
+`FBT-477-A56D`.
 
 Diese Punkte werden vor beziehungsweise gemeinsam mit dem MCP-Server gemäß
 [ROADMAP.md](./ROADMAP.md) umgesetzt.

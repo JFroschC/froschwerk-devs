@@ -17,6 +17,9 @@ const runId = valueFor("--run-id");
 if (!runId) throw new Error("--run-id ist erforderlich");
 const run = getAgentRun(runId);
 if (!run || run.role !== "tester") throw new Error(`Tester-Lauf nicht gefunden: ${runId}`);
+if (!['queued', 'running'].includes(String(run.status)) || run.task?.activeRunId !== runId || run.task?.activeRunRole !== 'tester') {
+  throw new Error(`Tester-Lauf ${runId} ist nicht der gültige aktive Tester-Lauf seines Tickets.`);
+}
 const definition = providerDefinition(String(run.provider));
 if (!definition) throw new Error(`Unbekannter Provider: ${run.provider}`);
 if (run.provider === "codex" && process.env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY ist gesetzt. Entferne ihn für das ChatGPT-Abo.");
@@ -54,10 +57,10 @@ Arbeitsregeln:
 - Schreibe keine fragilen Tests gegen exakte sichtbare UI-Texte, Copytexte, Fehlermeldungsformulierungen, CSS-Klassen oder andere reine Implementierungsdetails. Eine redaktionelle Textänderung darf keinen Test brechen.
 - Prüfe stattdessen stabiles Verhalten und fachliche Verträge: Statuscodes, Daten, Persistenz, Beziehungen, Validierung, API-Strukturen und nur bei ausdrücklicher Anforderung semantische UI-Struktur. Wenn ein bestehender Test nur an einem frei änderbaren Text hängt, stabilisiere ihn statt den Produktivtext festzuschreiben.
 - Der Harness führt den Projekt-Testbefehl nach deiner Antwort selbst aus. Behaupte keinen bestandenen Test, den du nicht durch einen echten Testlauf belegen kannst.
-- Der Status Testing ist bei deinem Start korrekt. Ein Ticket muss nach dem Entwicklerlauf nicht mehr Ready sein. Ready â†’ In Progress â†’ Review â†’ Testing ist der normale Ablauf.
+- Der Status Testing ist bei deinem Start korrekt. Ein Ticket muss nach dem Entwicklerlauf nicht mehr Ready sein. Ready → In Progress → Review → Testing ist der normale Ablauf.
 - Wenn ein Kriterium einen bereits ausgeführten Statuswechsel beschreibt, prüfe historische Events, Runs oder Logs. Verlange nicht, dass der aktuelle Status wieder Ready ist.
 - Wenn Browserzugriff, Node-REPL, npm, Git oder eine andere Testumgebung durch Policy/Sandbox fehlt, melde blocked statt failed.
-- Unter Windows verwende fÃ¼r npm immer npm.cmd (zum Beispiel npm.cmd test), nicht npm test, damit nicht versehentlich die gesperrte PowerShell-Datei npm.ps1 gestartet wird.
+- Unter Windows verwende für npm immer npm.cmd (zum Beispiel npm.cmd test), nicht npm test, damit nicht versehentlich die gesperrte PowerShell-Datei npm.ps1 gestartet wird.
 - Der noch ausstehende zentrale Harness-Testlauf ist niemals allein ein Grund fuer blocked. Wenn alle statisch pruefbaren Kriterien erfuellt sind, melde passed; der Harness fuehrt den Test danach selbst aus und verbindet beide Ergebnisse.
 - failed ist nur für einen reproduzierbaren Produktfehler erlaubt.
 - Verändere keinen Produktivcode.
@@ -131,7 +134,7 @@ function parseOutput(stdout) {
 function diagnosticTail(stdout, stderr, limit = 6_000) {
   const output = `${stdout}\n${stderr}`.trim();
   if (!output) return "Keine Ausgabe vom Tester erhalten.";
-  return output.length > limit ? `[... gekÃ¼rzt ...]\n${output.slice(-limit)}` : output;
+  return output.length > limit ? `[... gekürzt ...]\n${output.slice(-limit)}` : output;
 }
 
 function cliFailure(message, stdout, stderr) {

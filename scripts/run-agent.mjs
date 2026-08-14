@@ -40,6 +40,15 @@ if (provider === "claude" && process.env.ANTHROPIC_API_KEY) throw new Error("ANT
 
 const task = taskId ? listTasks().find((item) => item.id === taskId) : undefined;
 if (taskId && !task) throw new Error(`Ticket nicht gefunden: ${taskId}`);
+if (taskId && !requestedRunId) throw new Error("--run-id ist bei einem direkten --task-Start erforderlich");
+if (task && requestedRunId) {
+  const activeRun = getAgentRun(requestedRunId);
+  if (!activeRun || activeRun.role !== "developer" || activeRun.agentId !== agentId
+    || activeRun.taskId !== task.id || !["queued", "running"].includes(String(activeRun.status))
+    || task.activeRunId !== requestedRunId || task.activeRunRole !== "developer") {
+    throw new Error(`Run ${requestedRunId} ist nicht der gültige aktive Entwickler-Lauf für ${task.id}`);
+  }
+}
 const claim = task ? { task, runId: requestedRunId } : claimNextTask(agentId);
 if (!claim.task) throw new Error(`Kein Ticket verfügbar (${claim.reason ?? "unbekannt"})`);
 

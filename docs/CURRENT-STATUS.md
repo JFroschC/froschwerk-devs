@@ -11,14 +11,14 @@ historische Entwürfe und Audits liegen unter [archive/](./archive/README.md).
 - Git-Baseline: Initial-Commit `cb176550bc70463e44c75c950af04467db312f46`
   vom 14.08.2026
 - Node.js: `>=22.13.0`
-- `npm.cmd test`: Build erfolgreich, 50 von 50 Tests bestanden
+- `npm.cmd test`: Typecheck, Build erfolgreich, 54 von 54 Tests bestanden
 - `npm.cmd run lint`: erfolgreich
-- separater `tsc --noEmit`-Check: derzeit 48 TypeScript-Fehler
+- `npm.cmd run typecheck`: erfolgreich
 - die Dokumentationskonsolidierung dieses Stands ist nach dem Initial-Commit entstanden
   und bis zu einem neuen Commit als Arbeitsänderung sichtbar
 
-Der normale `npm.cmd test`-Lauf enthält aktuell keinen vollständigen TypeScript-Check.
-Ein grüner Build beweist daher noch keine TypeScript-Fehlerfreiheit.
+Der normale `npm.cmd test`-Lauf enthält den vollständigen TypeScript-Check vor Build
+und Node-Test-Suite.
 
 ## Implementiert
 
@@ -83,24 +83,18 @@ ist noch nicht implementiert.
 
 ## Bekannte technische Probleme
 
-1. **TypeScript-Gate fehlt:** `tsc --noEmit` meldet 48 Fehler; der normale Build
-   erkennt sie nicht.
-2. **Provider-Persistenz:** `migrateAgents()` setzt Standardprovider beim Öffnen der
-   Datenbank erneut und kann damit eine gespeicherte UI-Auswahl überschreiben.
-3. **Schema-Drift:** Das Drizzle-Schema bildet nicht alle Felder des autoritativen
-   Runtime-SQL-Schemas ab, unter anderem Planreihenfolge und Obsolet-Markierungen.
-4. **Lifecycle-Integrität:** Finish-, Cancel- und direkte Runnerpfade besitzen noch
-   keine durchgängige, rollenbasierte Zustandsmaschine.
-5. **Agentenstatus:** `agents.status` ist derzeit überwiegend Konfiguration und wird
-   nicht zuverlässig aus aktiven Runs abgeleitet.
-6. **Artefakte:** Die Tabelle existiert, aber es gibt noch keinen Schreib-/Lese-Service
-   und keine UI. Die lokale Datenbank enthielt beim letzten Audit null Artefakte.
-7. **Zeichenkodierung:** Drei sichtbare beziehungsweise promptrelevante Strings enthalten
-   noch Mojibake.
-8. **MCP-Projektpräfix:** Der maschinenlesbare Vertrag akzeptiert derzeit nur
-   `FW-...`, obwohl reale Projekte andere Schlüssel wie `FBT-...` verwenden.
+Die Prio-0-Integritätslücken sind geschlossen: gespeicherte Provider bleiben bei
+Migrationen erhalten, Runtime- und Drizzle-Schema enthalten dieselben Tabellen und
+Felder, und Start-/Finish-Grenzen prüfen Rolle, aktiven Run und Folgestatus. Der
+direkte `--task`-Modus erfordert einen passenden aktiven `--run-id`; ein Testerprozess
+prüft ebenfalls seine Bindung an den aktiven Tester-Run.
 
-Die priorisierte Behebung steht in [ROADMAP.md](./ROADMAP.md).
+1. **Agentenstatus:** `agents.status` ist derzeit überwiegend Konfiguration und wird
+   nicht zuverlässig aus aktiven Runs abgeleitet.
+2. **Artefakte:** Die Tabelle existiert, aber es gibt noch keinen Schreib-/Lese-Service
+   und keine UI. Die lokale Datenbank enthielt beim letzten Audit null Artefakte.
+
+Die verbleibende priorisierte Arbeit steht in [ROADMAP.md](./ROADMAP.md).
 
 ## Operativer Boardzustand
 

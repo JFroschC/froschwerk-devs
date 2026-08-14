@@ -15,11 +15,11 @@ Die Runtime verwendet Node `node:sqlite` mit:
 - fünf Sekunden Busy Timeout
 - Schemaerstellung und additiven Migrationen beim Öffnen der Datenbank
 
-Das tatsächlich ausgeführte Schema steht derzeit in `db/local.ts`. `db/schema.ts`
-spiegelt das Modell für Drizzle und eine mögliche spätere D1-Nutzung, ist aber aktuell
-nicht vollständig synchron. Diese bekannte Drift ist als Priorität 0 in
-[ROADMAP.md](./ROADMAP.md) erfasst. Im Verzeichnis `drizzle/` existiert noch keine
-vollständige versionierte Migrationshistorie.
+Das tatsächlich ausgeführte Schema steht in `db/local.ts`. `db/schema.ts` spiegelt
+dasselbe Tabellen- und Feldmodell für Drizzle und eine mögliche spätere D1-Nutzung,
+einschließlich Planreihenfolge, Obsolet-Markierungen und Manager-Task-Sequenzen. Im
+Verzeichnis `drizzle/` existiert noch keine vollständige versionierte
+Migrationshistorie.
 
 ## Tabellen
 
@@ -152,7 +152,6 @@ Run-Zustandsautomat mit Start-, Cancel-, Timeout- und Lost-Zuständen ist noch o
 
 ## Offene Datenbankarbeit
 
-- Runtime- und Drizzle-Schema synchronisieren
 - versionierte Migrationen einführen
 - Lifecycle-Zeitpunkte und Zustandsautomat ergänzen
 - Finish-/Cancel-Transitionen rollenbasiert validieren

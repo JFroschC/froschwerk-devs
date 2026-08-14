@@ -11,6 +11,7 @@ import {
   discardManagerPlan,
   findActiveManagerConversation,
   finishAgentRun,
+  getAgentRun,
   getLatestManagerPlan,
   getLatestProjectAnalysisSnapshot,
   getManagerConversation,
@@ -210,13 +211,31 @@ const server = createServer(async (request, response) => {
         const result = cancelActiveRun(runId);
         return result.cancelled ? json(response, 200, result) : json(response, 409, result);
       }
-      const task = finishAgentRun(runId, payload);
-      return task ? json(response, 200, { task }) : json(response, 404, { error: "agent run not found" });
+      if (payload.status !== "succeeded" && payload.status !== "failed") return json(response, 400, { error: "status must be succeeded or failed" });
+      const run = getAgentRun(runId);
+      if (!run) return json(response, 404, { error: "agent run not found" });
+      if (run.role !== "developer" || !["queued", "running"].includes(String(run.status)) || run.task?.activeRunId !== runId || run.task?.activeRunRole !== "developer") {
+        return json(response, 409, { error: "agent run is not the active developer run for its ticket" });
+      }
+      try {
+        const task = finishAgentRun(runId, payload);
+        return task ? json(response, 200, { task }) : json(response, 409, { error: "agent run is no longer active" });
+      } catch (error) {
+        return json(response, 400, { error: error instanceof Error ? error.message : "agent run could not be finished" });
+      }
     }
     const testerFinishMatch = pathname.match(/^\/api\/test-runs\/([^/]+)\/finish$/);
     if (request.method === "POST" && testerFinishMatch) {
-      const result = finishTesterAndContinue(decodeURIComponent(testerFinishMatch[1]), await readJson(request));
-      return result ? json(response, 200, result) : json(response, 404, { error: "tester run not found" });
+      const runId = decodeURIComponent(testerFinishMatch[1]);
+      const run = getAgentRun(runId);
+      if (!run) return json(response, 404, { error: "tester run not found" });
+      if (run.role !== "tester" || !["queued", "running"].includes(String(run.status)) || run.task?.activeRunId !== runId || run.task?.activeRunRole !== "tester") {
+        return json(response, 409, { error: "tester run is not the active run for its ticket" });
+      }
+      const payload = await readJson(request);
+      if (!["passed", "failed", "blocked"].includes(String(payload.status))) return json(response, 400, { error: "status must be passed, failed or blocked" });
+      const result = finishTesterAndContinue(runId, payload);
+      return result ? json(response, 200, result) : json(response, 409, { error: "tester run is no longer active" });
     }
 
     if (request.method === "GET" && pathname === "/api/chat") return json(response, 200, { messages: listChatMessages(undefined, url.searchParams.get("projectId") ?? undefined) });

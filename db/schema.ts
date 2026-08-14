@@ -40,8 +40,11 @@ export const tasks = sqliteTable("tasks", {
   maxRetries: integer("max_retries").notNull().default(3),
   parentTaskId: text("parent_task_id"),
   planId: text("plan_id"),
+  planSequence: integer("plan_sequence"),
   createdBy: text("created_by").notNull().default("user"),
   originKey: text("origin_key"),
+  obsoleteAt: text("obsolete_at"),
+  obsoleteReason: text("obsolete_reason"),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 }, (table) => [
@@ -49,6 +52,7 @@ export const tasks = sqliteTable("tasks", {
   index("idx_tasks_assignee_status").on(table.assigneeAgentId, table.status),
   index("idx_tasks_parent").on(table.parentTaskId),
   index("idx_tasks_plan").on(table.planId),
+  uniqueIndex("idx_tasks_origin_key_unique").on(table.originKey),
 ]);
 
 export const taskAcceptanceCriteria = sqliteTable("task_acceptance_criteria", {
@@ -132,7 +136,10 @@ export const agentRequests = sqliteTable("agent_requests", {
   promptPreview: text("prompt_preview").notNull().default(""),
   responsePreview: text("response_preview").notNull().default(""),
   error: text("error"),
-}, (table) => [index("idx_agent_requests_project_started").on(table.projectId, table.startedAt)]);
+}, (table) => [
+  index("idx_agent_requests_project_started").on(table.projectId, table.startedAt),
+  index("idx_agent_requests_run_started").on(table.runId, table.startedAt),
+]);
 
 export const taskEvents = sqliteTable("task_events", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -173,7 +180,10 @@ export const chatMessages = sqliteTable("chat_messages", {
   senderId: text("sender_id"),
   body: text("body").notNull(),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-}, (table) => [index("idx_chat_messages_created").on(table.createdAt)]);
+}, (table) => [
+  index("idx_chat_messages_created").on(table.createdAt),
+  index("idx_chat_messages_project_created").on(table.projectId, table.createdAt),
+]);
 
 export const managerConversations = sqliteTable("manager_conversations", {
   id: text("id").primaryKey(),
@@ -245,6 +255,7 @@ export const managerPlanTasks = sqliteTable("manager_plan_tasks", {
   title: text("title").notNull(),
   description: text("description").notNull().default(""),
   priority: text("priority").notNull().default("Medium"),
+  sequence: integer("sequence").notNull().default(0),
   acceptanceJson: text("acceptance_json").notNull().default("[]"),
   parentClientId: text("parent_client_id"),
   parentTaskId: text("parent_task_id"),
@@ -257,4 +268,5 @@ export const managerPlanTasks = sqliteTable("manager_plan_tasks", {
 }, (table) => [
   uniqueIndex("idx_manager_plan_task_client").on(table.planId, table.clientId),
   index("idx_manager_plan_tasks_plan_order").on(table.planId, table.sortOrder),
+  index("idx_manager_plan_tasks_plan_sequence").on(table.planId, table.sequence, table.sortOrder),
 ]);

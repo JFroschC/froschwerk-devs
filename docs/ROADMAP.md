@@ -12,19 +12,19 @@ Der Harness soll Agentenläufe zuverlässig starten, überwachen, abbrechen,
 wiederherstellen und nachvollziehbar darstellen. Anschließend kann die vorhandene
 Multi-Agent-Datenbasis sicher für parallele Arbeit genutzt werden.
 
-## Priorität 0 – Ausgangspunkt stabilisieren
+## Priorität 0 – Ausgangspunkt stabilisieren (abgeschlossen am 14. August 2026)
 
 Diese Punkte werden vor neuen Lifecycle-Funktionen erledigt:
 
-- [ ] gespeicherte Provider-Zuordnungen bei Datenbankmigrationen erhalten
-- [ ] Runtime-SQL und `db/schema.ts` vollständig synchronisieren
-- [ ] vorhandene 48 TypeScript-Fehler beheben
-- [ ] `typecheck` als npm-Skript ergänzen und in das Qualitätsgate aufnehmen
-- [ ] beschädigte UTF-8-Strings korrigieren
-- [ ] direkten `--task`-Runnerpfad ohne gültigen AgentRun verhindern
-- [ ] Finish-Endpunkte auf Rolle, aktuellen Runstatus und erlaubten Folgestatus prüfen
-- [ ] Testerstart zusätzlich an den aktiven Run des Tickets binden
-- [ ] MCP-Ticketpräfix projektunabhängig machen
+- [x] gespeicherte Provider-Zuordnungen bei Datenbankmigrationen erhalten
+- [x] Runtime-SQL und `db/schema.ts` vollständig synchronisieren
+- [x] vorhandene 48 TypeScript-Fehler beheben
+- [x] `typecheck` als npm-Skript ergänzen und in das Qualitätsgate aufnehmen
+- [x] beschädigte UTF-8-Strings korrigieren
+- [x] direkten `--task`-Runnerpfad ohne gültigen AgentRun verhindern
+- [x] Finish-Endpunkte auf Rolle, aktuellen Runstatus und erlaubten Folgestatus prüfen
+- [x] Testerstart zusätzlich an den aktiven Run des Tickets binden
+- [x] MCP-Ticketpräfix projektunabhängig machen
 
 Abnahme:
 
@@ -32,6 +32,9 @@ Abnahme:
 - Providerwechsel bleiben nach einem Neustart erhalten.
 - Runtime- und Drizzle-Schema beschreiben dieselben Tabellen und Felder.
 - Kein Runner kann ein Ticket außerhalb eines gültigen aktiven Runs bearbeiten.
+
+Verifiziert mit `npm.cmd run lint` und `npm.cmd test`: Typecheck, Produktions-Build
+und 54 Node-Tests sind erfolgreich.
 
 ## Priorität 1 – Agent Lifecycle v2
 

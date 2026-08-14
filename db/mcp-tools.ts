@@ -33,7 +33,7 @@ export const mcpToolContract = {
         type: "object",
         required: ["taskId"],
         properties: {
-          taskId: { type: "string", pattern: "^FW-[0-9A-Z-]+$" },
+          taskId: { type: "string", pattern: "^[A-Z0-9][A-Z0-9_-]*$" },
         },
         additionalProperties: false,
       },
@@ -45,7 +45,7 @@ export const mcpToolContract = {
         type: "object",
         required: ["taskId", "body"],
         properties: {
-          taskId: { type: "string", pattern: "^FW-[0-9A-Z-]+$" },
+          taskId: { type: "string", pattern: "^[A-Z0-9][A-Z0-9_-]*$" },
           body: { type: "string", minLength: 1, maxLength: 8000 },
           actor: { $ref: "#/$defs/actor" },
         },
@@ -59,7 +59,7 @@ export const mcpToolContract = {
         type: "object",
         required: ["taskId", "status"],
         properties: {
-          taskId: { type: "string", pattern: "^FW-[0-9A-Z-]+$" },
+          taskId: { type: "string", pattern: "^[A-Z0-9][A-Z0-9_-]*$" },
           status: { enum: ["Ready", "In Progress", "Review", "Testing", "Done", "Changes Requested", "Blocked"] },
           reason: { type: "string", maxLength: 2000 },
           actor: { $ref: "#/$defs/actor" },
@@ -73,7 +73,7 @@ export const mcpToolContract = {
       inputSchema: {
         type: "object",
         properties: {
-          taskId: { type: "string", pattern: "^FW-[0-9A-Z-]+$" },
+          taskId: { type: "string", pattern: "^[A-Z0-9][A-Z0-9_-]*$" },
         },
         additionalProperties: false,
       },

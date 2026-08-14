@@ -392,7 +392,7 @@ export default function Home() {
       setLastSyncedAt(new Date().toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
       setDbError((current) => current.startsWith("SQLite ") ? "" : current);
     } catch {
-      if (showError) setDbError("SQLite ist noch nicht erreichbar. Die Anzeige nutzt vorÃ¼bergehend die Startdaten.");
+      if (showError) setDbError("SQLite ist noch nicht erreichbar. Die Anzeige nutzt vorübergehend die Startdaten.");
     }
   }, [activeProjectId]);
 

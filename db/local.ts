@@ -4,7 +4,10 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 
-type Row = Record<string, unknown>;
+// node:sqlite returns dynamically shaped result rows. Keep that boundary local
+// to this module; the public mapping functions below expose stable objects.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Row = Record<string, any>;
 
 const databasePath = process.env.HARNESS_DB_PATH
   ? resolve(process.env.HARNESS_DB_PATH)
@@ -486,11 +489,14 @@ function migrateChatMessages(db: DatabaseSync) {
 
 function migrateAgents(db: DatabaseSync) {
   const columns = db.prepare("PRAGMA table_info(agents)").all() as Row[];
-  if (!columns.some((column) => column.name === "provider")) {
+  const providerWasAdded = !columns.some((column) => column.name === "provider");
+  if (providerWasAdded) {
     db.exec("ALTER TABLE agents ADD COLUMN provider TEXT NOT NULL DEFAULT 'codex'");
+    // Only databases from before the provider column need this backfill.
+    // Once a provider was stored, it is a user setting and must survive restarts.
+    db.prepare("UPDATE agents SET provider = 'claude' WHERE id = 'agent-developer-2'").run();
   }
-  db.prepare("UPDATE agents SET provider = 'codex' WHERE id IN ('agent-manager', 'agent-developer-1')").run();
-  db.prepare("UPDATE agents SET provider = 'claude' WHERE id = 'agent-developer-2'").run();
+  db.prepare("UPDATE agents SET provider = 'codex' WHERE provider IS NULL OR TRIM(provider) = ''").run();
 }
 
 function ensureDefaultAgents(db: DatabaseSync) {
@@ -962,8 +968,14 @@ export function finishTesterRun(runId: string, input: { status: "passed" | "fail
   let finishedTaskId: string | undefined;
   db.exec("BEGIN IMMEDIATE");
   try {
-    const run = db.prepare("SELECT task_id FROM agent_runs WHERE id = ? AND role = 'tester' AND status IN ('queued', 'running')").get(runId) as { task_id: string } | undefined;
+    const run = db.prepare(`SELECT runs.task_id, tasks.active_run_id AS activeRunId, tasks.status AS taskStatus
+      FROM agent_runs AS runs JOIN tasks ON tasks.id = runs.task_id
+      WHERE runs.id = ? AND runs.role = 'tester' AND runs.status IN ('queued', 'running')`).get(runId) as { task_id: string; activeRunId?: string; taskStatus?: string } | undefined;
     if (!run) { db.exec("ROLLBACK"); return undefined; }
+    if (run.activeRunId !== runId || run.taskStatus !== "Testing") {
+      db.exec("ROLLBACK");
+      return undefined;
+    }
     finishedTaskId = run.task_id;
     const nextStatus = input.status === "passed" ? "Done" : input.status === "blocked" ? "Blocked" : "Changes Requested";
     const reportId = id("report");
@@ -1069,18 +1081,29 @@ export function finishAgentRun(runId: string, input: { status: "succeeded" | "fa
   let finishedTaskId: string | undefined;
   db.exec("BEGIN IMMEDIATE");
   try {
-    const run = db.prepare(`SELECT runs.task_id AS taskId, runs.status, tasks.retry_count AS retryCount, tasks.max_retries AS maxRetries
+    const run = db.prepare(`SELECT runs.task_id AS taskId, runs.role, runs.status, tasks.active_run_id AS activeRunId,
+      tasks.status AS taskStatus, tasks.retry_count AS retryCount, tasks.max_retries AS maxRetries
       FROM agent_runs AS runs JOIN tasks ON tasks.id = runs.task_id WHERE runs.id = ?`).get(runId) as Row | undefined;
     if (!run) { db.exec("ROLLBACK"); return undefined; }
     finishedTaskId = String(run.taskId);
+    if (run.role !== "developer") {
+      db.exec("ROLLBACK");
+      return undefined;
+    }
     if (!["queued", "running"].includes(String(run.status))) {
       db.exec("COMMIT");
       return listTasks().find((task) => task.id === finishedTaskId);
+    }
+    if (run.activeRunId !== runId || run.taskStatus !== "In Progress") {
+      db.exec("ROLLBACK");
+      return undefined;
     }
     const countRetry = input.status === "failed" && input.countRetry !== false;
     const retryCount = input.status === "succeeded" ? 0 : Number(run.retryCount ?? 0) + (countRetry ? 1 : 0);
     const exhausted = input.status === "failed" && countRetry && retryCount >= Number(run.maxRetries ?? 3);
     const nextStatus = exhausted ? "Blocked" : input.nextStatus ?? (input.status === "succeeded" ? "Review" : "Ready");
+    const expectedNextStatus = input.status === "succeeded" ? "Review" : "Ready";
+    if (!exhausted && nextStatus !== expectedNextStatus) throw new Error(`Ungültiger Folgestatus ${nextStatus} für einen Entwicklerlauf mit Status ${input.status}`);
     db.prepare("UPDATE agent_runs SET status = ?, summary = ?, error = ?, process_id = NULL, finished_at = ? WHERE id = ?").run(input.status, input.summary ?? "", input.error ?? null, now, runId);
     db.prepare("DELETE FROM agent_leases WHERE run_id = ?").run(runId);
     db.prepare("UPDATE agent_requests SET status = ?, finished_at = ?, duration_ms = MAX(0, CAST((julianday(?) - julianday(started_at)) * 86400000 AS INTEGER)), error = COALESCE(error, ?) WHERE run_id = ? AND status = 'running'").run(input.status === "succeeded" ? "succeeded" : "failed", now, now, input.error ?? input.summary ?? "Agentenlauf beendet", runId);

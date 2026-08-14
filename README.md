@@ -107,14 +107,13 @@ Die JSON-Ausgabe muss `ok: true`, `persistedBeforeCleanup: true` und
 
 ```powershell
 npm.cmd run lint
+npm.cmd run typecheck
 npm.cmd test
 npm.cmd run build
 ```
 
-`npm.cmd test` führt bereits den Produktions-Build und die vollständige
-Node-Test-Suite aus. Ein separater TypeScript-Check ist momentan noch nicht Teil
-dieses Gates; die bekannte Lücke ist in [CURRENT-STATUS.md](./docs/CURRENT-STATUS.md)
-und [ROADMAP.md](./docs/ROADMAP.md) dokumentiert.
+`npm.cmd test` führt den TypeScript-Check, den Produktions-Build und die vollständige
+Node-Test-Suite aus.
 
 ## Dokumentation
 

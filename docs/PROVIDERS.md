@@ -14,10 +14,9 @@ bleiben vollständig in den jeweiligen CLIs.
 - QA Bot (`agent-tester-1`) → Codex
 
 Die Auswahl wird in `agents.provider` gespeichert und kann in der Seitenleiste
-geändert werden. Bekannte Einschränkung: `migrateAgents()` setzt beim Öffnen der
-Datenbank momentan die Standardprovider erneut. Eine abweichende gespeicherte Auswahl
-kann dadurch nach einem Neustart verloren gehen. Die Korrektur ist Priorität 0 in
-[ROADMAP.md](./ROADMAP.md).
+geändert werden. `migrateAgents()` ergänzt Standardwerte nur für Datenbanken aus der
+Zeit vor der Provider-Spalte oder für leere Werte; eine gespeicherte Auswahl bleibt
+nach einem Neustart erhalten.
 
 ## Lokale Anmeldung
 
@@ -110,9 +109,8 @@ node --experimental-strip-types scripts/run-agent.mjs --agent agent-developer-1
 node --experimental-strip-types scripts/run-agent.mjs --agent agent-developer-2
 ```
 
-Ein manueller `--provider`-Override ist möglich. Der direkte `--task`-Modus ohne
-gültige `--run-id` ist derzeit nicht lifecycle-sicher und soll bis zur Korrektur
-nicht verwendet werden.
+Ein manueller `--provider`-Override ist möglich. Der direkte `--task`-Modus verlangt
+einen gültigen aktiven `--run-id`, dessen Agent, Rolle und Ticket exakt passen.
 
 ## Request-Tracking
 
