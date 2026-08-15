@@ -18,7 +18,7 @@ deren lokale Abo-Logins.
 - AgentRuns, AgentRequests, Leases, Task-Events und TestReports
 - Lease-Erneuerung, Timeouts, begrenzte Retries und Recovery nach Prozessabbrüchen
 - sequenzieller Autoprozess: `Review → Tester → Done → nächstes Ready → Entwickler → Review`
-- vollständiges Projekt-Testgate vor der Übergabe eines Entwicklerlaufs an den Tester
+- vollständiges Projekt-Testgate vor der Übergabe eines Entwicklerlaufs an den Tester; ein stillstehender Testprozess blockiert sofort statt blind erneut zu starten
 - isoliertes Git-Vertrauen für Workspaces eines getrennten Windows-Benutzers
 
 Der Manager- und Workflow-Kern ist nutzbar. Lifecycle-Daten werden per Polling als

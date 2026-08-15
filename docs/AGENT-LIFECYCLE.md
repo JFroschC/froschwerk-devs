@@ -74,6 +74,11 @@ Er erstellt danach ausschließlich einen neuen Run. Ein aktiver oder `cancelling
 bleibt immer startblockierend, bis der Supervisor beziehungsweise der Runner sein
 Prozessende bestätigt hat.
 
+Ein stillstehendes Entwickler-Projekt-Testgate wird als nicht wiederholbarer
+Diagnosebefund behandelt: Das Ticket wechselt sofort zu `Blocked`. Ein manueller
+Start ist erst nach der dokumentierten Ursachenbehebung möglich; die automatische
+Retry-Kette wird hierfür nicht ausgelöst.
+
 ## Zuständigkeiten
 
 - `db/local.ts`: atomare Persistenz, Transitionen und Reporting-Funktionen.

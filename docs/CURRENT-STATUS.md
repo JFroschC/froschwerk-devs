@@ -43,6 +43,9 @@ historische Audits und Übergaben im [Archiv](./archive/README.md).
   Retry-Voraussetzungen geprüft.
 - Jeder Retry erhält einen neuen Run. Der terminale Vorgänger einschließlich Requests,
   Logs, Testergebnis und Beendigungsgrund bleibt unverändert erhalten.
+- Ein Entwickler-Testgate, das nach Testausgabe ohne Prozessende stillsteht, blockiert
+  das Ticket beim ersten Befund. Es wird nicht automatisch erneut gestartet; die
+  konkrete Cleanup- oder Handle-Ursache muss zuerst behoben werden.
 - Bestätigung, Abbruch der Bestätigung, serverseitige Ablehnung und akzeptierte Aktion
   werden als `agent.action_*`-Events gespeichert; Lifecycle-Transitionen bleiben
   eigene kanonische Events.

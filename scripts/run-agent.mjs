@@ -73,6 +73,7 @@ Arbeitsregeln:
 - Implementiere die kleinste sinnvolle Änderung.
 - Suche vor der Implementierung repositoryweit nach bestehenden Tests, die die von dir geänderten Routen, Entitäten, Enums, Schemafelder oder Verträge verwenden. Wenn eine beabsichtigte fachliche Änderung eine alte Testannahme ungültig macht, aktualisiere diesen Test im selben Ticket, ohne seine sinnvolle Abdeckung zu entfernen.
 - Jeder Test, der HTTP-Server, Datenbanken, Worker, Timer, Streams oder temporäre Dateien erzeugt, muss die Bereinigung unmittelbar nach der Erzeugung registrieren oder mit try/finally absichern. Cleanup darf niemals nur hinter Assertions stehen, weil eine fehlgeschlagene Assertion sonst den gesamten Testprozess offen hält.
+- Enthält die Ticket-Historie einen Projekt-Testgate-Leerlauf, starte keine unveränderte vollständige Suite erneut. Ermittle zuerst anhand des letzten ausgegebenen Tests und der betroffenen Cleanup-Pfade die Ursache, behebe sie und dokumentiere den Befund.
 - Führe relevante Tests und Checks aus. Verwende unter Node 24.15 auf Windows niemals --test-force-exit, weil diese Option beim Schließen von HTTP-Handles einen libuv-Absturz auslösen kann. Sorge in Testcode stattdessen mit finally-Hooks dafür, dass Server und Datenbanken auch nach fehlgeschlagenen Assertions geschlossen werden.
 - Führe gezielte Tests für deine Änderung aus. Der Harness startet nach deiner Abschlussantwort automatisch genau einmal die vollständige Projektsuite und gibt das Ticket nur bei Erfolg an den Tester weiter. Beende keine Endlosschleife aus Analyse und Einzeltests – fasse den aktuellen Stand zusammen, wenn du ohne neue Erkenntnis nicht weiterkommst.
 - Schreibe keine fragilen Tests gegen exakte sichtbare UI-Texte, Copytexte, Fehlermeldungsformulierungen, CSS-Klassen oder andere reine Implementierungsdetails. Eine redaktionelle Textänderung darf keinen Test brechen.
@@ -385,11 +386,13 @@ async function finalizeDeveloper(code, spawnError, completedByTurnEvent = false,
   let finishedTask;
   if (claim.runId) {
     const gateError = gatePassed ? undefined : `DEVELOPER_PROJECT_TEST_GATE_FAILED: ${gateResult.error ?? projectTestFailureExcerpt(gateResult.logs)}`;
+    const idleGateTimeout = /^DEVELOPER_PROJECT_TEST_IDLE_TIMEOUT:/.test(String(gateResult.error ?? ""));
     finishedTask = finishAgentRun(claim.runId, {
       status: developerSucceeded ? "succeeded" : timedOut ? "timed_out" : "failed",
-      summary: developerSucceeded ? `${definition.label} beendet; vollständiges Projekt-Testgate bestanden.` : cliSucceeded ? "Entwickler-Übergabegate fehlgeschlagen; Ticket bleibt beim Entwickler." : timedOut ? `${definition.label} wurde wegen Inaktivität abgebrochen.` : `${definition.label} endete mit Exit-Code ${effectiveCode}.`,
+      summary: developerSucceeded ? `${definition.label} beendet; vollständiges Projekt-Testgate bestanden.` : idleGateTimeout ? "Entwickler-Übergabegate endete ohne weitere Testausgabe; Ticket wurde ohne automatischen Retry blockiert." : cliSucceeded ? "Entwickler-Übergabegate fehlgeschlagen; Ticket bleibt beim Entwickler." : timedOut ? `${definition.label} wurde wegen Inaktivität abgebrochen.` : `${definition.label} endete mit Exit-Code ${effectiveCode}.`,
       error: developerSucceeded ? undefined : gateError ?? (timedOut ? `REQUEST_TIMEOUT: ${timeoutReason}` : cliError),
       nextStatus: developerSucceeded ? "Review" : "Ready",
+      blockOnFailure: idleGateTimeout,
       exitCode: code ?? null,
       signal: signal ?? null,
       terminationReason: developerSucceeded ? "completed" : timedOut ? "timeout" : spawnError ? "spawn_error" : "process_exit",

@@ -54,6 +54,27 @@ test("developer failures retry only to the configured boundary", () => {
   `), "ok");
 });
 
+test("developer idle test gates block immediately without blind retries", () => {
+  assert.equal(run(`
+    import assert from "node:assert/strict";
+    const db = await import(${JSON.stringify(databaseModule)});
+    const task = db.createTask({ title: "Stilles Testgate" });
+    const claimed = db.claimNextTask("agent-developer-1", task.id, "project-agent-harness");
+    assert.ok(claimed.runId);
+    db.markAgentRunRunning(claimed.runId);
+    const finished = db.finishAgentRun(claimed.runId, {
+      status: "failed",
+      error: "DEVELOPER_PROJECT_TEST_IDLE_TIMEOUT",
+      nextStatus: "Ready",
+      blockOnFailure: true,
+    });
+    assert.equal(finished.retryCount, 1);
+    assert.equal(finished.status, "Blocked");
+    assert.equal(db.claimNextTask("agent-developer-1", task.id, "project-agent-harness").reason, "task_not_ready");
+    console.log("ok");
+  `), "ok");
+});
+
 test("lease expiry is supervised before a developer ticket is released", () => {
   assert.equal(run(`
     import assert from "node:assert/strict";

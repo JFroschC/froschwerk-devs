@@ -1351,7 +1351,7 @@ export function resumeSourceTaskAfterFollowUp(followUpTaskId: string) {
   return listTasks(projectId).find((task) => task.id === sourceTaskId);
 }
 
-export function finishAgentRun(runId: string, input: { status: "succeeded" | "failed" | "timed_out" | "lost"; summary?: string; error?: string; nextStatus?: string; countRetry?: boolean; exitCode?: number | null; signal?: string | null; terminationReason?: string }) {
+export function finishAgentRun(runId: string, input: { status: "succeeded" | "failed" | "timed_out" | "lost"; summary?: string; error?: string; nextStatus?: string; countRetry?: boolean; blockOnFailure?: boolean; exitCode?: number | null; signal?: string | null; terminationReason?: string }) {
   const db = getDatabase();
   const now = timestamp();
   let finishedTaskId: string | undefined;
@@ -1377,7 +1377,8 @@ export function finishAgentRun(runId: string, input: { status: "succeeded" | "fa
     const failureStatus = input.status !== "succeeded";
     const countRetry = failureStatus && input.countRetry !== false;
     const retryCount = input.status === "succeeded" ? 0 : Number(run.retryCount ?? 0) + (countRetry ? 1 : 0);
-    const exhausted = failureStatus && countRetry && retryCount >= Number(run.maxRetries ?? 3);
+    const blockedImmediately = failureStatus && input.blockOnFailure === true;
+    const exhausted = blockedImmediately || (failureStatus && countRetry && retryCount >= Number(run.maxRetries ?? 3));
     const nextStatus = exhausted ? "Blocked" : input.nextStatus ?? (input.status === "succeeded" ? "Review" : "Ready");
     const expectedNextStatus = input.status === "succeeded" ? "Review" : "Ready";
     if (!exhausted && nextStatus !== expectedNextStatus) throw new Error(`Ungültiger Folgestatus ${nextStatus} für einen Entwicklerlauf mit Status ${input.status}`);
@@ -1386,8 +1387,9 @@ export function finishAgentRun(runId: string, input: { status: "succeeded" | "fa
     db.prepare("DELETE FROM agent_leases WHERE run_id = ?").run(runId);
     db.prepare("UPDATE agent_requests SET status = ?, finished_at = ?, duration_ms = MAX(0, CAST((julianday(?) - julianday(started_at)) * 86400000 AS INTEGER)), error = COALESCE(error, ?) WHERE run_id = ? AND status = 'running'").run(input.status === "succeeded" ? "succeeded" : input.status === "timed_out" ? "timeout" : "failed", now, now, input.error ?? input.summary ?? "Agentenlauf beendet", runId);
     db.prepare("UPDATE tasks SET status = ?, retry_count = ?, active_run_id = NULL, assignee_agent_id = NULL, updated_at = ? WHERE id = ? AND active_run_id = ?").run(nextStatus, retryCount, now, run.taskId, runId);
-    addEventInternal(db, String(run.taskId), "agent.run_finished", "agent", runId, { status: input.status, nextStatus, retryCount, exhausted, summary: input.summary ?? "" }, now);
-    if (exhausted) addCommentInternal(db, String(run.taskId), "manager", "agent-manager", "Mira", `Der Entwicklerlauf ist ${retryCount}-mal fehlgeschlagen. Das Ticket wurde nach Erreichen der Retry-Grenze blockiert.`, now);
+    addEventInternal(db, String(run.taskId), "agent.run_finished", "agent", runId, { status: input.status, nextStatus, retryCount, exhausted, blockedImmediately, summary: input.summary ?? "" }, now);
+    if (blockedImmediately) addCommentInternal(db, String(run.taskId), "manager", "agent-manager", "Mira", "Der Entwicklerlauf wurde wegen eines nicht endenden Projekt-Testgates sofort blockiert. Es erfolgt kein automatischer Retry; zuerst muss die konkrete Testursache behoben werden.", now);
+    else if (exhausted) addCommentInternal(db, String(run.taskId), "manager", "agent-manager", "Mira", `Der Entwicklerlauf ist ${retryCount}-mal fehlgeschlagen. Das Ticket wurde nach Erreichen der Retry-Grenze blockiert.`, now);
     db.exec("COMMIT");
   } catch (error) { db.exec("ROLLBACK"); throw error; }
   return listTasks().find((task) => task.id === finishedTaskId);
