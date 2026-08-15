@@ -9,6 +9,8 @@ deren lokale Abo-Logins.
 
 - Projektverwaltung mit getrennten Workspaces, Boards und Mira-Chats
 - Ticketboard mit Status, Priorität, Akzeptanzkriterien, Kommentaren und Abhängigkeiten
+- Papier-Redesign mit fester Mira-Rechtsleiste, eigener Agentenseite und responsiver
+  Run-/Aktivitätsansicht
 - SQLite als autoritative Laufzeit-Datenquelle
 - Manager-Orchestrierung mit Projektanalyse, Rückfragen, Planvorschau und atomarer
   Ticketanlage
@@ -34,7 +36,7 @@ stehen in [ROADMAP.md](./docs/ROADMAP.md).
 
 - Windows für den vorgesehenen getrennten Agentenbetrieb
 - Node.js `>=22.13.0`
-- lokal installierte und angemeldete Codex- beziehungsweise Claude-Code-CLI
+- lokal installierte und angemeldete Codex-CLI; Claude Code ist optional
 - keine API-Keys für den Abo-Betrieb
 
 ## Starten
@@ -42,7 +44,8 @@ stehen in [ROADMAP.md](./docs/ROADMAP.md).
 Für den getrennten Benutzer `FroschAgent`:
 
 1. Einmal `setup-froschwerk-agent.bat` ausführen.
-2. Codex beziehungsweise Claude Code lokal anmelden.
+2. Codex lokal anmelden; Claude Code kann im Setup optional installiert und mit dem
+   Pro-/Max-Abo angemeldet werden.
 3. Den Laufzeitcheck erfolgreich abschließen.
 4. Danach den Harness über `start-froschwerk-agent.bat` starten.
 
@@ -63,6 +66,11 @@ Datenbank, Workspace, Git-Vertrauen, Provider-Login oder Profilverzeichnisse nic
 funktionieren. `HOME`, `USERPROFILE` und `CODEX_HOME` werden für Child-Prozesse
 konsistent gesetzt. Git-`safe.directory` wird nur im jeweiligen Child-Environment
 gesetzt; die globale Git-Konfiguration bleibt unverändert.
+
+Das Agenten-Setup fragt nach dem Codex-Login optional nach Claude Code. Bei Zustimmung
+installiert es die CLI im Profil von `FroschAgent`, startet den interaktiven `/login`
+und prüft anschließend den Loginstatus. Ohne Zustimmung bleibt der Codex-only-Betrieb
+voll nutzbar.
 
 ## Autoprozess
 

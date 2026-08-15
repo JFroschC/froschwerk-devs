@@ -28,8 +28,9 @@ Migrationshistorie.
 - `projects`: Projektkennung, Workspace, Start-/Testbefehl, Autoprozess und Archivstatus
 - `agents`: Rolle, Provider, konfigurierter Status und Kapazitätslimit
 
-Der aktuelle Wert von `agents.status` ist noch kein belastbarer Laufzeitstatus. Eine
-Ableitung aus aktiven Runs ist Teil des nächsten Lifecycle-Meilensteins.
+Der konfigurierte Wert von `agents.status` wird von der Laufzeit getrennt behandelt.
+Die Oberfläche leitet den sichtbaren Kurzstatus aus aktiven Runs, Leases und dem
+konfigurierten `enabled`-Zustand ab.
 
 ### Tickets und Workflow
 

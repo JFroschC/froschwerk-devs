@@ -1,6 +1,6 @@
 # Roadmap
 
-Stand: 14. August 2026
+Stand: 15. August 2026
 
 Diese Roadmap ersetzt die früheren Phasenpläne. Bereits umgesetzte Funktionen stehen
 in [CURRENT-STATUS.md](./CURRENT-STATUS.md); historische Entwürfe bleiben unter
@@ -273,18 +273,18 @@ Standardentwickler.
 
 ## Priorität 7 – Board-, Ticket- und Mira-UI vervollständigen
 
-### Mira-Chatfenster stabilisieren
+### Papier-Redesign und Mira-Rechtsleiste
 
-- [ ] Größenverwaltung von Chatfenster und internem Planbereich nachvollziehbar trennen
-- [ ] gespeicherte Größen beim Laden validieren und ungültige oder veraltete Werte auf
-  sichere Standardwerte zurücksetzen
-- [ ] Größen bei Drag, Browser-Resize und Wechsel des Responsive-Breakpoints zuverlässig
-  auf den sichtbaren Viewport begrenzen
-- [ ] Resize bei `pointerup`, `pointercancel` und Fokusverlust sicher beenden
-- [ ] verhindern, dass Kopfbereich, Eingabefeld oder Größen-Griff außerhalb des
-  sichtbaren Bereichs geraten
-- [ ] Zurücksetzen auf Standardgröße und Wiederherstellung nach einem Reload testen
-- [ ] Interaktionstests für Resize, Reload und Desktop-/Mobilwechsel ergänzen
+- [x] schwebendes, resizebares Mira-Fenster durch eine feste rechte Spalte ersetzen
+- [x] gespeicherte Chat-/Plan-Größen und Resize-Interaktion ersatzlos entfernen
+- [x] Ticketdetail und Mira-Chat als gegenseitig ausschließliche rechte Ansicht führen
+- [x] Board, Aktivität, Läufe und Run-Detail im Papier-Design konsistent darstellen
+- [x] Agentenstatus, Konfiguration, Auftrag, Rechte und Laufhistorie auf eine eigene
+  Agentenansicht verlagern
+
+Abgeschlossen am 15. August 2026. Die ausgearbeiteten Design-Referenzen bleiben unter
+[`change_package/`](./change_package/README.md) als Dokumentation; die produktive
+Umsetzung liegt in `app/page.tsx`, `app/globals.css` und `app/layout.tsx`.
 
 ### Allgemeine UI-Funktionen
 
@@ -292,15 +292,15 @@ Standardentwickler.
 - [ ] Boardfilter nach Status, Priorität, Agent, Provider und Projekt ergänzen
 - [ ] Benachrichtigungen für Fehler, Blockaden, Testergebnisse und abgeschlossene Runs
   anzeigen
-- [ ] Ticketdetail zuverlässig schließen und die Auswahl zurücksetzen
-- [ ] funktionslose Spaltenmenüs entweder sinnvoll verdrahten oder entfernen
+- [x] Ticketdetail zuverlässig schließen und die Auswahl zurücksetzen
+- [x] funktionslose Spaltenmenüs entfernen
 - [ ] Ticket-Abhängigkeiten im Detail anzeigen und bearbeiten
 - [ ] eigene Kommentare bearbeiten und löschen können
 
 Abnahme:
 
-- Das Mira-Chatfenster bleibt nach Ziehen, Reload und Viewportwechsel vollständig
-  bedienbar und lässt sich immer auf eine gültige Standardgröße zurücksetzen.
+- Mira bleibt ohne Größenverwaltung als feste, responsive rechte Ansicht bedienbar und
+  kann jederzeit zum Ticketdetail zurückwechseln.
 - Alle sichtbaren Bedienelemente besitzen eine nachvollziehbare Funktion oder werden
   nicht angezeigt.
 - Tickets und relevante Laufereignisse lassen sich ohne manuelles Durchsuchen aller

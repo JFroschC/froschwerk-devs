@@ -1,6 +1,6 @@
 # Provider und Agentenzuordnung
 
-Stand: 14. August 2026
+Stand: 15. August 2026
 
 Der Harness startet lokal installierte Codex- und Claude-Code-CLIs. Die Website fragt
 keine Passwörter, OAuth-Tokens oder API-Keys ab. Authentifizierung und Abo-Nutzung
@@ -13,10 +13,11 @@ bleiben vollständig in den jeweiligen CLIs.
 - Dev Agent 2 (`agent-developer-2`) → Claude Code
 - QA Bot (`agent-tester-1`) → Codex
 
-Die Auswahl wird in `agents.provider` gespeichert und kann in der Seitenleiste
-geändert werden. `migrateAgents()` ergänzt Standardwerte nur für Datenbanken aus der
-Zeit vor der Provider-Spalte oder für leere Werte; eine gespeicherte Auswahl bleibt
-nach einem Neustart erhalten.
+Die Auswahl wird in `agents.provider` gespeichert und in der Agentenansicht geändert.
+Die Seitenleiste zeigt nur Name, Kurzstatus und Verbindungsstatus.
+`migrateAgents()` ergänzt Standardwerte nur für Datenbanken aus der Zeit vor der
+Provider-Spalte oder für leere Werte; eine gespeicherte Auswahl bleibt nach einem
+Neustart erhalten.
 
 ## Lokale Anmeldung
 
@@ -35,6 +36,11 @@ claude.exe
 ```
 
 Danach `/login` ausführen und das Claude-Pro-/Max-Konto auswählen.
+
+Das Setup für `FroschAgent` fragt nach dem Codex-Login optional nach einer
+Claude-Einrichtung. Es installiert Claude Code bei Bedarf, startet die interaktive
+Anmeldung und prüft danach `claude.exe auth status --json`. Bei der Anmeldung muss das
+Pro-/Max-Abo gewählt werden, nicht „Claude Console“ (API-Abrechnung).
 
 ## Sicherheitsregeln
 
@@ -123,5 +129,5 @@ Jede Manager-, Entwickler-, Tester- und zentrale Testanfrage wird als
 - geschätzte beziehungsweise gemeldete Tokens
 - Prompt-/Antwortvorschau und Fehler
 
-Die UI zeigt eine kompakte Request- und Tokenübersicht. Eine vollständige
-Run-Detailansicht ist Teil der Roadmap.
+Die UI zeigt eine kompakte Request- und Tokenübersicht. Die Agentenansicht und der
+Run-Detail-Drawer stellen die vollständigen Request-, Event- und Testdaten dar.

@@ -52,7 +52,14 @@ Details: [Agent-Lifecycle-Vertrag](./AGENT-LIFECYCLE.md).
 ## Oberfläche
 
 - Polling synchronisiert Board, Runs, Requests und Task-Events alle zwei Sekunden.
-- Agentenübersicht, projektbezogene Run-Historie und Run-Details zeigen Lifecycle-,
+- Die Oberfläche verwendet ein warmes Papier-Design mit Instrument Serif für
+  Überschriften und semantischen CSS-Tokens; die Design-Referenzen liegen unter
+  [`change_package/`](./change_package/README.md).
+- Mira ist eine feste rechte Spalte, die im Board das Ticketdetail ersetzt. Die früheren
+  schwebenden Chat- und Resize-Panels samt gespeicherten Größen existieren nicht mehr.
+- Agenten besitzen eine eigene Ansicht mit aktuellem Lauf, Anfrage-/Event-/Testreiter,
+  Laufhistorie, Provider-Konfiguration, Auftrag, Rechten und Warteschlange.
+- Projektbezogene Run-Historie, Aktivität und Run-Detail-Drawer zeigen Lifecycle-,
   Request-, Test- und Eventdaten ohne eigene UI-Zustandslogik.
 - Leere oder historisch unvollständige Daten werden ausdrücklich gekennzeichnet.
 - Die Aktivitätsansicht macht Run-Transitionen sowie Start-, Stop- und
@@ -60,6 +67,8 @@ Details: [Agent-Lifecycle-Vertrag](./AGENT-LIFECYCLE.md).
 - Der Mira-Bereich zeigt die jüngsten Manager-Versuche mit Phase, Fehlern,
   Verknüpfungen und ihren Cancel-/Retry-Aktionen. Polling aktualisiert diese Werte
   zusammen mit dem übrigen Workspace.
+- Die Providerwahl liegt in der Agentenansicht; die Seitenleiste zeigt nur den
+  Verbindungs- und Kurzstatus.
 
 ## Noch offen / bewusste Grenzen
 
@@ -69,3 +78,5 @@ Details: [Agent-Lifecycle-Vertrag](./AGENT-LIFECYCLE.md).
   Streaming sind nicht implementiert.
 - Provider-Zugangsdaten werden nicht gespeichert; für den Abo-Betrieb bleiben
   `OPENAI_API_KEY` und `ANTHROPIC_API_KEY` leer.
+- Die Agentenseite ist derzeit eine clientseitige Workspace-Ansicht, keine eigene
+  URL-Route pro Agent.
